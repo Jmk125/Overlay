@@ -15,6 +15,8 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Auto-scale** — enter drawing scale (e.g. 1/4" = 1') for each set; B is auto-resized to match A
 - **Save/load project** — .overlay JSON files preserve all transform state
 - **Export** — PNG or PDF export of current overlay
+- **Drag & drop** — drop PDF files straight onto the Set A / Set B panels
+- **Customizable controls** — set zoom (scroll vs. Ctrl+scroll), pan button (left/middle/right), and edge antialiasing in Preferences
 
 ## Keyboard Shortcuts
 
@@ -24,12 +26,13 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 | `2` | Show Set A only |
 | `3` | Show Set B only |
 | `F` | Fit to window |
-| `Ctrl+Scroll` | Zoom in/out |
-| `Right-click drag` | Pan canvas |
+| `Scroll` | Zoom in/out *(configurable: scroll or Ctrl+scroll)* |
+| `Right-click drag` | Pan canvas *(configurable: left/middle/right)* |
 | `Shift+drag` | Fine movement or rotation |
 | `Ctrl+N` | New overlay |
 | `Ctrl+O` | Open project |
 | `Ctrl+S` | Save project |
+| `Ctrl+,` | Preferences |
 
 ## Setup
 
@@ -76,17 +79,22 @@ drawing_overlay/
 │   ├── renderer.py      # PDF rendering, transform, compositing
 │   └── persistence.py   # Save/load .overlay projects and settings
 └── ui/
-    ├── landing.py       # New overlay / open project screen
+    ├── landing.py       # New overlay / open project screen (drag & drop)
     ├── page_selector.py # PDF page picker with thumbnails
     ├── matching.py      # Sheet matching screen (OCR + manual queue)
+    ├── settings_dialog.py # Preferences (controls, rendering, colors)
     └── viewer.py        # Main overlay viewer with all tools
 ```
 
 ## Settings
 
+Open **Edit ▸ Preferences** (`Ctrl+,`) to customize controls and rendering.
 Settings are saved to `~/.drawing_overlay/settings.json` and include:
 - Default colors for Set A and Set B
 - Render DPI
+- Zoom behavior (scroll to zoom, or require Ctrl+scroll)
+- Pan mouse button (left / middle / right)
+- Edge antialiasing (smooths jagged lines when zooming low-DPI renders)
 - Default export path
 - Last open directory
 - Ink detection threshold

@@ -16,6 +16,7 @@ from core.persistence import load_settings, save_settings, save_project, load_pr
 from ui.landing import LandingScreen
 from ui.matching import MatchingScreen
 from ui.viewer import OverlayViewer
+from ui.settings_dialog import SettingsDialog
 
 SETTINGS_PATH = os.path.expanduser("~/.drawing_overlay/settings.json")
 
@@ -101,6 +102,12 @@ class MainWindow(QMainWindow):
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
+        edit_menu = menubar.addMenu("Edit")
+        prefs_act = QAction("Preferences...", self)
+        prefs_act.setShortcut("Ctrl+,")
+        prefs_act.triggered.connect(self._open_settings_dialog)
+        edit_menu.addAction(prefs_act)
+
         help_menu = menubar.addMenu("Help")
         shortcuts_act = QAction("Keyboard Shortcuts", self)
         shortcuts_act.triggered.connect(self._show_shortcuts)
@@ -136,6 +143,17 @@ class MainWindow(QMainWindow):
             w = self.stack.widget(0)
             self.stack.removeWidget(w)
             w.deleteLater()
+
+    def _open_settings_dialog(self):
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec():
+            # Merge choices into the live settings dict (shared with screens).
+            self.settings.update(dlg.updated_settings())
+            save_settings(self.settings, SETTINGS_PATH)
+            # Apply control/render preferences immediately if a viewer is open.
+            current = self.stack.currentWidget()
+            if isinstance(current, OverlayViewer):
+                current.apply_settings()
 
     def _open_project_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -183,15 +201,18 @@ Overlay Viewer:
   2 — Set A only
   3 — Set B only
   F — Fit to window
-  Ctrl+Scroll — Zoom in/out
-  Right-click drag — Pan
+  Scroll — Zoom in/out (configurable in Preferences)
+  Right-click drag — Pan (configurable in Preferences)
   Shift+drag — Fine movement/rotation
 
 General:
   Ctrl+N — New overlay
   Ctrl+O — Open project
   Ctrl+S — Save project
+  Ctrl+, — Preferences
   Ctrl+Q — Quit
+
+Zoom, pan and antialiasing can be customized in Edit ▸ Preferences.
         """.strip())
 
 

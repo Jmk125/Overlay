@@ -108,10 +108,16 @@ class OverlayCanvas(QGraphicsView):
         self.gscene = QGraphicsScene(self)
         self.setScene(self.gscene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self._bg_white = True
         self._apply_bg()
+
+        # ── Configurable controls (set via apply_view_settings) ──
+        self._zoom_on_scroll = True
+        self._pan_button = Qt.MouseButton.RightButton
+        self._antialiasing = True
 
         self._mode = self.MODE_VIEW
         self._panning = False
@@ -144,6 +150,30 @@ class OverlayCanvas(QGraphicsView):
         self._bg_white = white
         self._apply_bg()
 
+    _PAN_BUTTONS = {
+        'left': Qt.MouseButton.LeftButton,
+        'middle': Qt.MouseButton.MiddleButton,
+        'right': Qt.MouseButton.RightButton,
+    }
+
+    def apply_view_settings(self, zoom_on_scroll: bool, pan_button: str, antialiasing: bool):
+        """Apply user control/render preferences to the canvas."""
+        self._zoom_on_scroll = zoom_on_scroll
+        self._pan_button = self._PAN_BUTTONS.get(pan_button, Qt.MouseButton.RightButton)
+        self.set_antialiasing(antialiasing)
+
+    def set_antialiasing(self, on: bool):
+        self._antialiasing = on
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, on)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, on)
+        mode = (Qt.TransformationMode.SmoothTransformation if on
+                else Qt.TransformationMode.FastTransformation)
+        for item in (self._item_a, self._item_b, self._item_composite):
+            if item:
+                item.setTransformationMode(mode)
+        if self.gscene:
+            self.gscene.update()
+
     def set_mode(self, mode: int):
         self._mode = mode
         if mode == self.MODE_VIEW:
@@ -162,6 +192,10 @@ class OverlayCanvas(QGraphicsView):
         self._item_a = self.gscene.addPixmap(pix_a if pix_a else QPixmap())
         self._item_b = self.gscene.addPixmap(pix_b if pix_b else QPixmap())
         self._item_composite = self.gscene.addPixmap(pix_composite if pix_composite else QPixmap())
+        mode = (Qt.TransformationMode.SmoothTransformation if self._antialiasing
+                else Qt.TransformationMode.FastTransformation)
+        for item in (self._item_a, self._item_b, self._item_composite):
+            item.setTransformationMode(mode)
         self._update_visibility()
         self.fitInView(self.gscene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -180,14 +214,22 @@ class OverlayCanvas(QGraphicsView):
             self._item_b.setVisible(self._view_mode == 'b')
 
     def wheelEvent(self, event: QWheelEvent):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        # Zoom when scroll-zoom is enabled, or whenever Ctrl is held.
+        if self._zoom_on_scroll or ctrl:
             factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
             self.scale(factor, factor)
         else:
             super().wheelEvent(event)
 
+    def _pan_blocked_on_left(self) -> bool:
+        """If panning is bound to the left button, don't pan while an align
+        (move/rotate) mode is active — the left drag belongs to the transform."""
+        return (self._pan_button == Qt.MouseButton.LeftButton
+                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE))
+
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.RightButton:
+        if event.button() == self._pan_button and not self._pan_blocked_on_left():
             self._panning = True
             self._pan_start = event.position()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
@@ -244,7 +286,7 @@ class OverlayCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.RightButton:
+        if self._panning and event.button() == self._pan_button:
             self._panning = False
             self.set_mode(self._mode)
         super().mouseReleaseEvent(event)
@@ -267,6 +309,9 @@ class OverlayViewer(QWidget):
         self._dirty = False
 
         self._build_ui()
+
+        # Apply control/render preferences (zoom, pan button, antialiasing)
+        self.apply_settings()
 
         # Sync background state from overlay_set (matters when loading a saved project)
         white = (overlay_set.canvas_bg != 'dark')
@@ -525,6 +570,16 @@ class OverlayViewer(QWidget):
         QShortcut(QKeySequence("2"), self, lambda: self._set_view('a'))
         QShortcut(QKeySequence("3"), self, lambda: self._set_view('b'))
         QShortcut(QKeySequence("F"), self, self.canvas.fit_view)
+
+    def apply_settings(self):
+        """Push the current control/render preferences onto the canvas.
+        Safe to call again after settings change in Preferences."""
+        s = self.settings
+        self.canvas.apply_view_settings(
+            zoom_on_scroll=s.get('zoom_on_scroll', True),
+            pan_button=s.get('pan_button', 'right'),
+            antialiasing=s.get('antialiasing', True),
+        )
 
     def _load_pair(self, index: int):
         if index < 0 or index >= len(self.overlay_set.pairs):
