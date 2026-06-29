@@ -13,6 +13,7 @@ from PyQt6.QtGui import QAction, QFont, QColor, QPalette
 
 from core.models import OverlaySet
 from core.persistence import load_settings, save_settings, save_project, load_project
+from core import renderer as R
 from ui.landing import LandingScreen
 from ui.matching import MatchingScreen
 from ui.viewer import OverlayViewer
@@ -25,6 +26,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = load_settings(SETTINGS_PATH)
+        # Point OCR at a bundled/explicit Tesseract if one is configured.
+        R.configure_tesseract(self.settings.get('tesseract_path'))
         self.setWindowTitle("Drawing Overlay Tool")
         self.setMinimumSize(1200, 750)
         self._apply_dark_theme()
@@ -162,6 +165,8 @@ class MainWindow(QMainWindow):
             # Merge choices into the live settings dict (shared with screens).
             self.settings.update(dlg.updated_settings())
             save_settings(self.settings, SETTINGS_PATH)
+            # Re-point OCR in case the Tesseract path changed.
+            R.configure_tesseract(self.settings.get('tesseract_path'))
             # Apply control/render preferences immediately if a viewer is open.
             if isinstance(current, OverlayViewer):
                 current.apply_settings()

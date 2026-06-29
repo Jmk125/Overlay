@@ -77,6 +77,32 @@ pyinstaller --onefile --windowed --name "DrawingOverlay" main.py
 
 The .exe will be in the `dist/` folder.
 
+### Bundling Tesseract (no install needed for end users)
+
+Tesseract isn't a single file — `tesseract.exe` needs its DLLs and a
+`tessdata/` language folder — but the whole folder is **portable**. To ship OCR
+with your app so users don't install anything:
+
+1. Install the [UB-Mannheim Tesseract build](https://github.com/UB-Mannheim/tesseract/wiki)
+   on **any one** Windows machine.
+2. Copy the entire install folder (`C:\Program Files\Tesseract-OCR`) into this
+   project as a folder named **`tesseract/`** (so you have
+   `tesseract/tesseract.exe` and `tesseract/tessdata/`).
+   - To shrink it, you can delete everything in `tessdata/` except
+     `eng.traineddata` (and `osd.traineddata`).
+3. The app **auto-detects** a `tesseract/` (or `Tesseract-OCR/`) folder placed
+   next to `main.py` or next to the built `.exe` — no configuration needed.
+   You can also point to a custom location in **Edit ▸ Preferences ▸ OCR**.
+
+Package it into the build with `--add-data` (Windows uses `;` as the separator):
+
+```bash
+pyinstaller --onefile --windowed --name "DrawingOverlay" ^
+  --add-data "tesseract;tesseract" main.py
+```
+
+Preferences ▸ OCR shows a green check when Tesseract is found.
+
 ## Project Structure
 
 ```

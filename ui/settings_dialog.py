@@ -5,12 +5,15 @@ Lets the user customize viewer controls (zoom & pan behavior), rendering
 quality (antialiasing, default DPI) and default drawing colors. Settings are
 returned via updated_settings() and persisted by the caller.
 """
+import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton, QLabel,
-    QComboBox, QCheckBox, QSpinBox, QGroupBox, QColorDialog, QFrame
+    QComboBox, QCheckBox, QSpinBox, QGroupBox, QColorDialog, QFrame,
+    QLineEdit, QFileDialog
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
+from core import renderer as R
 
 
 class _ColorSwatch(QPushButton):
@@ -135,6 +138,28 @@ class SettingsDialog(QDialog):
         col_row.addStretch()
         root.addWidget(colors)
 
+        # ── OCR (Tesseract) ───────────────────────────────────────
+        ocr = QGroupBox("OCR (sheet matching)")
+        ocr.setStyleSheet(self._group_style())
+        ocr_layout = QVBoxLayout(ocr)
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Tesseract:"))
+        self.tess_edit = QLineEdit(self._settings.get('tesseract_path', ''))
+        self.tess_edit.setPlaceholderText("Auto-detected — or pick tesseract.exe / its folder")
+        path_row.addWidget(self.tess_edit, 1)
+        browse = QPushButton("Browse…")
+        browse.setStyleSheet("background:#2a4a6b; color:white; border:none; padding:4px 10px; border-radius:3px;")
+        browse.clicked.connect(self._browse_tesseract)
+        path_row.addWidget(browse)
+        ocr_layout.addLayout(path_row)
+
+        self.tess_status = QLabel("")
+        self.tess_status.setWordWrap(True)
+        ocr_layout.addWidget(self.tess_status)
+        self._refresh_tess_status()
+        self.tess_edit.textChanged.connect(self._refresh_tess_status)
+        root.addWidget(ocr)
+
         # ── Buttons ───────────────────────────────────────────────
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -160,9 +185,30 @@ class SettingsDialog(QDialog):
         self._settings['antialiasing'] = self.aa_check.isChecked()
         self._settings['canvas_bg'] = self.bg_combo.currentData()
         self._settings['render_dpi'] = self.dpi_spin.value()
+        self._settings['tesseract_path'] = self.tess_edit.text().strip()
         self._settings['default_color_a'] = self.color_a.color()
         self._settings['default_color_b'] = self.color_b.color()
         return self._settings
+
+    def _browse_tesseract(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Locate tesseract executable", "",
+            "Tesseract (tesseract.exe tesseract);;All files (*)")
+        if path:
+            self.tess_edit.setText(path)
+
+    def _refresh_tess_status(self):
+        """Show whether the current path (or auto-detection) finds Tesseract."""
+        path = self.tess_edit.text().strip()
+        ok = R.configure_tesseract(path) or R.tesseract_available()
+        if ok and R.tesseract_available():
+            self.tess_status.setText("✓ Tesseract found — auto sheet matching is available.")
+            self.tess_status.setStyleSheet("color:#27a350; font-size:10px;")
+        else:
+            self.tess_status.setText(
+                "✗ Tesseract not found. Install it, or drop a portable "
+                "'tesseract' folder next to the app, or point to tesseract.exe above.")
+            self.tess_status.setStyleSheet("color:#ff8c69; font-size:10px;")
 
     def _group_style(self) -> str:
         return """
