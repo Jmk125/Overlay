@@ -189,12 +189,18 @@ def render_thumbnail(pdf_path: str, page_index: int, max_size: int = 200) -> QPi
     return pil_to_qpixmap(img)
 
 
-def ocr_region(pdf_path: str, page_index: int, rect_norm: tuple, dpi: int = 200) -> str:
+def ocr_region(pdf_path: str, page_index: int, rect_norm: tuple, dpi: int = 300) -> str:
     """
     OCR a normalized region (x1,y1,x2,y2 as 0-1 fractions of page) and return text.
+
+    The region is rendered at high DPI, converted to high-contrast grayscale and
+    restricted to the characters that appear in sheet numbers. We try a
+    single-line pass first, then fall back to a block pass — this noticeably
+    reduces "unread" results on small title blocks.
     """
     try:
         import pytesseract
+        from PIL import ImageOps
         doc = fitz.open(pdf_path)
         page = doc[page_index]
         pw = page.rect.width
@@ -205,9 +211,20 @@ def ocr_region(pdf_path: str, page_index: int, rect_norm: tuple, dpi: int = 200)
         pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
         doc.close()
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        # Upscale for better OCR
-        img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
-        text = pytesseract.image_to_string(img, config='--psm 7').strip()
+
+        # Preprocess: grayscale + autocontrast, and upscale tiny crops.
+        g = ImageOps.autocontrast(ImageOps.grayscale(img))
+        if max(g.size) < 500:
+            scale = 500.0 / max(g.size)
+            g = g.resize((max(1, int(g.width * scale)),
+                          max(1, int(g.height * scale))), Image.LANCZOS)
+
+        whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-/"
+        base = f"-c tessedit_char_whitelist={whitelist}"
+        # psm 7 = single text line; psm 6 = uniform block (fallback).
+        text = pytesseract.image_to_string(g, config=f"--psm 7 {base}").strip()
+        if not text:
+            text = pytesseract.image_to_string(g, config=f"--psm 6 {base}").strip()
         return text
-    except Exception as e:
+    except Exception:
         return ""

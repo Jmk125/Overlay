@@ -5,7 +5,7 @@ CollapsibleSection — a titled section with a clickable header that expands /
 collapses its body. Used for the View / Align / Rotation / Scale / Export
 groups in the right-hand tools pane.
 """
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QToolButton, QFrame
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QToolButton, QFrame, QSizePolicy
 from PyQt6.QtCore import Qt
 
 
@@ -21,6 +21,9 @@ class CollapsibleSection(QWidget):
         self.toggle.setCheckable(True)
         self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Fill the full pane width rather than shrinking to the label.
+        self.toggle.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                  QSizePolicy.Policy.Fixed)
         self.toggle.setStyleSheet("""
             QToolButton {
                 background: #1f1f1f; color: #ddd; border: 1px solid #333;
