@@ -17,7 +17,7 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Rotation** — quick 90°/45° buttons, or free-rotate with click-drag around adjustable pivot point
 - **Collapsible UI** — collapse the pairs pane, the tools pane, and each tool section (View / Align / Rotation / Scale / Export) to keep the workspace clean
 - **Auto-scale** — enter drawing scale (e.g. 1/4" = 1') for each set; B is auto-resized to match A
-- **Markups** — draw lines, boxes and revision clouds in any color and line weight; per drawing, undo/clear
+- **Markups** — draw lines, boxes and revision clouds in any color and line weight; select to move or delete individual marks; per drawing, undo/clear
 - **Per-drawing notes** — jot notes for each sheet; retained when you switch drawings and saved in the project
 - **Save/load project** — .overlay JSON files preserve all transform state, markups and notes
 - **Export** — PNG or PDF export of current overlay (optionally with markups burned in)
