@@ -141,6 +141,12 @@ class MainWindow(QMainWindow):
     def _clear_stack(self):
         while self.stack.count():
             w = self.stack.widget(0)
+            # Let screens stop background threads before they're destroyed.
+            if hasattr(w, '_shutdown'):
+                try:
+                    w._shutdown()
+                except Exception:
+                    pass
             self.stack.removeWidget(w)
             w.deleteLater()
 
