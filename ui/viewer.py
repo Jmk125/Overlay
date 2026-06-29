@@ -378,8 +378,11 @@ class OverlayViewer(QWidget):
         # Apply control/render preferences (zoom, pan button, antialiasing)
         self.apply_settings()
 
-        # Sync background state from overlay_set (matters when loading a saved project)
+        # Sync background state from overlay_set (matters when loading a saved
+        # project). Derive the shared-line color from the background so a saved
+        # project can never show black linework on a dark canvas.
         white = (overlay_set.canvas_bg != 'dark')
+        overlay_set.shared_color = '#000000' if white else '#ffffff'
         self.canvas.set_background(white)
 
         self._load_pair(0)

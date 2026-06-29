@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QMessageBox, QLineEdit, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot, QRectF, QPointF
-from PyQt6.QtGui import QFont, QPixmap, QPainter, QPen, QColor, QBrush
+from PyQt6.QtGui import QFont, QPixmap, QPainter, QPen, QColor, QBrush, QCursor
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
 from PyQt6.QtCore import QRectF
 import os
@@ -20,7 +20,14 @@ from core import renderer as R
 
 
 class OCRBoxView(QGraphicsView):
-    """View where the user draws an OCR bounding box"""
+    """
+    View where the user draws an OCR bounding box.
+    - Left-drag      = draw the box
+    - Scroll         = zoom (centered on the cursor)
+    - Right/Middle-drag = pan
+    Zooming lets the user enlarge a small title block so the box can be drawn
+    accurately (a sloppy box is the usual cause of "unread" sheet numbers).
+    """
     box_drawn = pyqtSignal(QRectF)
 
     def __init__(self, parent=None):
@@ -29,22 +36,54 @@ class OCRBoxView(QGraphicsView):
         self.setScene(self.scene)
         self.setStyleSheet("background: #1a1a1a; border: 1px solid #555;")
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self._pixmap_item = None
         self._rect_item = None
         self._start = None
+        self._panning = False
+        self._pan_start = QPointF()
+        self._user_zoomed = False
         self._img_w = 1
         self._img_h = 1
 
     def load_page(self, pdf_path: str, page_index: int):
-        pix = R.render_thumbnail(pdf_path, page_index, max_size=600)
+        # Render at a higher resolution than a plain thumbnail so the title
+        # block stays crisp when zoomed in.
+        pix = R.render_thumbnail(pdf_path, page_index, max_size=1600)
         self._img_w = pix.width()
         self._img_h = pix.height()
         self.scene.clear()
         self._pixmap_item = self.scene.addPixmap(pix)
-        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.scene.setSceneRect(QRectF(pix.rect()))
         self._rect_item = None
+        self._user_zoomed = False
+        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
+    # ── Zoom controls ─────────────────────────────────────────────
+    def wheelEvent(self, event):
+        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        self.scale(factor, factor)
+        self._user_zoomed = True
+
+    def zoom_in(self):
+        self.scale(1.25, 1.25); self._user_zoomed = True
+
+    def zoom_out(self):
+        self.scale(1 / 1.25, 1 / 1.25); self._user_zoomed = True
+
+    def fit(self):
+        if self._pixmap_item:
+            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self._user_zoomed = False
+
+    # ── Mouse: left = draw box, right/middle = pan ────────────────
     def mousePressEvent(self, event):
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._panning = True
+            self._pan_start = event.position()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._start = self.mapToScene(event.position().toPoint())
             if self._rect_item:
@@ -52,6 +91,14 @@ class OCRBoxView(QGraphicsView):
                 self._rect_item = None
 
     def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.position() - self._pan_start
+            self._pan_start = event.position()
+            self.horizontalScrollBar().setValue(
+                int(self.horizontalScrollBar().value() - delta.x()))
+            self.verticalScrollBar().setValue(
+                int(self.verticalScrollBar().value() - delta.y()))
+            return
         if self._start:
             end = self.mapToScene(event.position().toPoint())
             rect = QRectF(self._start, end).normalized()
@@ -60,28 +107,37 @@ class OCRBoxView(QGraphicsView):
             else:
                 pen = QPen(QColor("#FFD700"), 2)
                 pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)   # constant on-screen width regardless of zoom
                 self._rect_item = self.scene.addRect(rect, pen,
                     QBrush(QColor(255, 215, 0, 40)))
 
     def mouseReleaseEvent(self, event):
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._panning = False
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._start:
             end = self.mapToScene(event.position().toPoint())
             rect = QRectF(self._start, end).normalized()
             if self._rect_item:
                 self._rect_item.setRect(rect)
             self._start = None
-            # Emit normalized rect
+            # Ignore an accidental click with no real area.
+            if rect.width() < 2 or rect.height() < 2:
+                return
+            # Emit normalized rect (clamped to the page)
             norm = QRectF(
-                rect.x() / self._img_w,
-                rect.y() / self._img_h,
-                rect.width() / self._img_w,
-                rect.height() / self._img_h,
+                max(0.0, rect.x() / self._img_w),
+                max(0.0, rect.y() / self._img_h),
+                min(1.0, rect.width() / self._img_w),
+                min(1.0, rect.height() / self._img_h),
             )
             self.box_drawn.emit(norm)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._pixmap_item:
+        # Only auto-fit until the user takes manual zoom control.
+        if self._pixmap_item and not self._user_zoomed:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
 
@@ -191,6 +247,24 @@ class MatchingScreen(QWidget):
         self.ocr_view.setMinimumSize(400, 400)
         self.ocr_view.box_drawn.connect(self._on_box_drawn)
         left_col.addWidget(self.ocr_view)
+
+        # Zoom controls + hint (zoom in to draw a tight box around the number)
+        zoom_row = QHBoxLayout()
+        zoom_in_btn = QPushButton("＋ Zoom In")
+        zoom_in_btn.clicked.connect(self.ocr_view.zoom_in)
+        zoom_out_btn = QPushButton("－ Zoom Out")
+        zoom_out_btn.clicked.connect(self.ocr_view.zoom_out)
+        fit_btn = QPushButton("⤢ Fit")
+        fit_btn.clicked.connect(self.ocr_view.fit)
+        for b in (zoom_in_btn, zoom_out_btn, fit_btn):
+            b.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
+            zoom_row.addWidget(b)
+        zoom_row.addStretch()
+        left_col.addLayout(zoom_row)
+
+        zoom_hint = QLabel("Scroll = zoom · right-drag = pan · left-drag = draw box")
+        zoom_hint.setStyleSheet("color: #777; font-size: 10px;")
+        left_col.addWidget(zoom_hint)
 
         # Load first page from set A as sample
         if self.pages_a:
