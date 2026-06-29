@@ -189,6 +189,32 @@ def render_thumbnail(pdf_path: str, page_index: int, max_size: int = 200) -> QPi
     return pil_to_qpixmap(img)
 
 
+def tesseract_available() -> bool:
+    """True if pytesseract is importable and the Tesseract binary is reachable."""
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+
+def render_region_pixmap(pdf_path: str, page_index: int, rect_norm: tuple,
+                         dpi: int = 300) -> QPixmap:
+    """Render just the boxed region of a page to a QPixmap (for OCR preview)."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_index]
+    pw = page.rect.width
+    ph = page.rect.height
+    x1, y1, x2, y2 = rect_norm
+    clip = fitz.Rect(x1 * pw, y1 * ph, x2 * pw, y2 * ph)
+    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+    pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+    doc.close()
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    return pil_to_qpixmap(img)
+
+
 def ocr_region(pdf_path: str, page_index: int, rect_norm: tuple, dpi: int = 300) -> str:
     """
     OCR a normalized region (x1,y1,x2,y2 as 0-1 fractions of page) and return text.

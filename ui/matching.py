@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSplitter, QFrame, QProgressBar,
     QScrollArea, QMessageBox, QLineEdit, QDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot, QRectF, QPointF
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot, QRectF, QPointF, QTimer
 from PyQt6.QtGui import QFont, QPixmap, QPainter, QPen, QColor, QBrush, QCursor
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
 from PyQt6.QtCore import QRectF
@@ -267,8 +267,9 @@ class MatchingScreen(QWidget):
         left_col.addWidget(zoom_hint)
 
         # Load first page from set A as sample
-        if self.pages_a:
-            self.ocr_view.load_page(self.pages_a[0].pdf_path, self.pages_a[0].page_index)
+        self._sample_page = self.pages_a[0] if self.pages_a else None
+        if self._sample_page:
+            self.ocr_view.load_page(self._sample_page.pdf_path, self._sample_page.page_index)
 
         top_split.addLayout(left_col, 2)
 
@@ -279,6 +280,23 @@ class MatchingScreen(QWidget):
         self.box_status = QLabel("No box drawn yet")
         self.box_status.setStyleSheet("color: #FFD700; font-size: 11px;")
         right_col.addWidget(self.box_status)
+
+        # ── Live preview of what OCR reads on the sample page ──
+        preview_frame = QFrame()
+        preview_frame.setStyleSheet("QFrame { background: #161616; border: 1px solid #333; border-radius: 5px; }")
+        pf_layout = QVBoxLayout(preview_frame)
+        pf_layout.setContentsMargins(8, 8, 8, 8)
+        pf_layout.addWidget(QLabel("Sample read preview:", styleSheet="color:#bbb; font-weight:bold; border:none;"))
+        self.preview_img = QLabel("Draw a box to test OCR")
+        self.preview_img.setFixedHeight(70)
+        self.preview_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_img.setStyleSheet("background:#0d0d0d; border:1px solid #333; color:#666;")
+        pf_layout.addWidget(self.preview_img)
+        self.preview_text = QLabel("")
+        self.preview_text.setWordWrap(True)
+        self.preview_text.setStyleSheet("color:#aaa; font-size:11px; border:none;")
+        pf_layout.addWidget(self.preview_text)
+        right_col.addWidget(preview_frame)
 
         self.run_ocr_btn = QPushButton("▶  Run OCR & Auto-Match")
         self.run_ocr_btn.setFixedHeight(38)
@@ -380,6 +398,45 @@ class MatchingScreen(QWidget):
             f"— {rect.width():.2f}×{rect.height():.2f} (normalized)"
         )
         self.run_ocr_btn.setEnabled(True)
+        # Show what OCR reads on the sample page before committing to a full run.
+        self.preview_text.setText("Reading…")
+        self.preview_text.setStyleSheet("color:#FFD700; font-size:11px; border:none;")
+        QTimer.singleShot(30, self._update_preview)
+
+    def _update_preview(self):
+        """Render the boxed crop and OCR it on the sample page so the user can
+        confirm the number is being read before running the whole batch."""
+        if not self._sample_page or not self.norm_rect:
+            return
+        rect = (self.norm_rect.x(), self.norm_rect.y(),
+                self.norm_rect.x() + self.norm_rect.width(),
+                self.norm_rect.y() + self.norm_rect.height())
+        page = self._sample_page
+
+        # Show the cropped region so the user sees exactly what's being OCR'd.
+        try:
+            pix = R.render_region_pixmap(page.pdf_path, page.page_index, rect)
+            scaled = pix.scaledToHeight(64, Qt.TransformationMode.SmoothTransformation)
+            self.preview_img.setPixmap(scaled)
+        except Exception:
+            self.preview_img.setText("(could not render crop)")
+
+        if not R.tesseract_available():
+            self.preview_text.setText(
+                "⚠ Tesseract OCR not found. Install it (and ensure it's on your "
+                "PATH), or use “Skip OCR — Match Manually”.")
+            self.preview_text.setStyleSheet("color:#ff8c69; font-size:11px; border:none;")
+            return
+
+        text = R.ocr_region(page.pdf_path, page.page_index, rect)
+        if text:
+            self.preview_text.setText(f"Read:  “{text}”   — looks good? Run the full match.")
+            self.preview_text.setStyleSheet("color:#27a350; font-size:12px; font-weight:bold; border:none;")
+        else:
+            self.preview_text.setText(
+                "No text detected. Zoom in and draw a tighter box around just "
+                "the sheet number, then try again.")
+            self.preview_text.setStyleSheet("color:#FFD700; font-size:11px; border:none;")
 
     def _run_ocr(self):
         self.run_ocr_btn.setEnabled(False)
