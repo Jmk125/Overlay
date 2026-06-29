@@ -145,15 +145,21 @@ class MainWindow(QMainWindow):
             w.deleteLater()
 
     def _open_settings_dialog(self):
+        current = self.stack.currentWidget()
+        # Seed the dialog's background choice from the open project so it
+        # reflects what's actually on screen.
+        if isinstance(current, OverlayViewer):
+            self.settings['canvas_bg'] = current.overlay_set.canvas_bg
+
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
             # Merge choices into the live settings dict (shared with screens).
             self.settings.update(dlg.updated_settings())
             save_settings(self.settings, SETTINGS_PATH)
             # Apply control/render preferences immediately if a viewer is open.
-            current = self.stack.currentWidget()
             if isinstance(current, OverlayViewer):
                 current.apply_settings()
+                current.set_background_mode(self.settings.get('canvas_bg', 'white'))
 
     def _open_project_dialog(self):
         path, _ = QFileDialog.getOpenFileName(

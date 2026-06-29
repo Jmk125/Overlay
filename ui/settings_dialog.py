@@ -92,6 +92,13 @@ class SettingsDialog(QDialog):
         rform = QFormLayout(render)
         rform.setSpacing(8)
 
+        self.bg_combo = QComboBox()
+        self.bg_combo.addItem("White", 'white')
+        self.bg_combo.addItem("Dark", 'dark')
+        bg_idx = self.bg_combo.findData(self._settings.get('canvas_bg', 'white'))
+        self.bg_combo.setCurrentIndex(bg_idx if bg_idx >= 0 else 0)
+        rform.addRow("Canvas background:", self.bg_combo)
+
         self.aa_check = QCheckBox("Smooth edges (antialiasing)")
         self.aa_check.setChecked(bool(self._settings.get('antialiasing', True)))
         rform.addRow("Quality:", self.aa_check)
@@ -151,6 +158,7 @@ class SettingsDialog(QDialog):
         self._settings['zoom_on_scroll'] = bool(self.zoom_combo.currentData())
         self._settings['pan_button'] = self.pan_combo.currentData()
         self._settings['antialiasing'] = self.aa_check.isChecked()
+        self._settings['canvas_bg'] = self.bg_combo.currentData()
         self._settings['render_dpi'] = self.dpi_spin.value()
         self._settings['default_color_a'] = self.color_a.color()
         self._settings['default_color_b'] = self.color_b.color()

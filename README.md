@@ -10,8 +10,10 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Unmatched queue** — manually pair any sheets that couldn't be auto-matched
 - **Color compositing** — shared lines = black; Set A only = your color; Set B only = your color
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
+- **Real-time alignment** — Drawing B moves and rotates live under the cursor (GPU-accelerated layer transforms); the full color composite is recomputed only when you release
 - **Click & drag alignment** — move Drawing B with left-click drag; Shift for fine movement
 - **Rotation** — quick 90°/45° buttons, or free-rotate with click-drag around adjustable pivot point
+- **Collapsible UI** — collapse the pairs pane, the tools pane, and each tool section (View / Align / Rotation / Scale / Export) to keep the workspace clean
 - **Auto-scale** — enter drawing scale (e.g. 1/4" = 1') for each set; B is auto-resized to match A
 - **Save/load project** — .overlay JSON files preserve all transform state
 - **Export** — PNG or PDF export of current overlay
@@ -83,6 +85,7 @@ drawing_overlay/
     ├── page_selector.py # PDF page picker with thumbnails
     ├── matching.py      # Sheet matching screen (OCR + manual queue)
     ├── settings_dialog.py # Preferences (controls, rendering, colors)
+    ├── collapsible.py   # Collapsible section widget for the tools pane
     └── viewer.py        # Main overlay viewer with all tools
 ```
 
@@ -95,6 +98,7 @@ Settings are saved to `~/.drawing_overlay/settings.json` and include:
 - Zoom behavior (scroll to zoom, or require Ctrl+scroll)
 - Pan mouse button (left / middle / right)
 - Edge antialiasing (smooths jagged lines when zooming low-DPI renders)
+- Canvas background (white or dark)
 - Default export path
 - Last open directory
 - Ink detection threshold
