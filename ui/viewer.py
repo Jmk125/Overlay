@@ -103,6 +103,7 @@ class MarkupOverlayItem(QGraphicsItem):
         self._h = float(h)
         self._markups = []
         self._pending = None
+        self._selected = None   # index of selected markup, or None
         self.setZValue(1000)   # always above the drawings
 
     def boundingRect(self) -> QRectF:
@@ -116,11 +117,38 @@ class MarkupOverlayItem(QGraphicsItem):
         self._pending = m
         self.update()
 
+    def set_selected(self, idx):
+        self._selected = idx
+        self.update()
+
     def paint(self, painter, option, widget=None):
         items = list(self._markups)
         if self._pending:
             items = items + [self._pending]
         R.paint_markups(painter, items, self._w, self._h)
+
+        # Selection highlight (dashed box + corner handles).
+        if self._selected is not None and 0 <= self._selected < len(self._markups):
+            pts = [(p[0] * self._w, p[1] * self._h)
+                   for p in self._markups[self._selected].get('points', [])]
+            if len(pts) >= 2:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                pad = 8
+                rect = QRectF(min(xs) - pad, min(ys) - pad,
+                              (max(xs) - min(xs)) + 2 * pad,
+                              (max(ys) - min(ys)) + 2 * pad)
+                pen = QPen(QColor('#00e0ff'))
+                pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor('#00e0ff'))
+                for hx, hy in [(rect.left(), rect.top()), (rect.right(), rect.top()),
+                               (rect.left(), rect.bottom()), (rect.right(), rect.bottom())]:
+                    painter.drawRect(QRectF(hx - 3, hy - 3, 6, 6))
 
 
 class OverlayCanvas(QGraphicsView):
@@ -175,10 +203,14 @@ class OverlayCanvas(QGraphicsView):
         self._markup_item = None
         self._canvas_w = 1.0
         self._canvas_h = 1.0
-        self._markup_tool = 'line'        # 'line' | 'rect' | 'cloud'
+        self._markup_tool = 'line'        # 'select' | 'line' | 'rect' | 'cloud'
         self._markup_color = '#ff3030'
         self._markup_width = 0.003        # normalized fraction of canvas width
         self._pending_markup = None
+        self._selected_markup = None      # index of selected markup
+        self._select_dragging = False
+        self._select_last = None
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # receive Delete key
 
         # Live layered preview (A + transformed B) — on while aligning
         self._live = False
@@ -264,6 +296,8 @@ class OverlayCanvas(QGraphicsView):
         self._canvas_w, self._canvas_h = float(cw), float(ch)
         self._markup_item = MarkupOverlayItem(self._canvas_w, self._canvas_h)
         self.gscene.addItem(self._markup_item)
+        self._selected_markup = None
+        self._select_dragging = False
         if pair is not None:
             self._markup_item.set_markups(pair.markups)
 
@@ -274,6 +308,8 @@ class OverlayCanvas(QGraphicsView):
     # ── Markups ───────────────────────────────────────────────────
     def set_markup_tool(self, tool: str):
         self._markup_tool = tool
+        if tool != 'select':
+            self._select_markup(None)
 
     def set_markup_color(self, hex_color: str):
         self._markup_color = hex_color
@@ -284,9 +320,57 @@ class OverlayCanvas(QGraphicsView):
     def _scene_to_norm(self, scene_pos) -> list:
         return [scene_pos.x() / self._canvas_w, scene_pos.y() / self._canvas_h]
 
+    def _select_markup(self, idx):
+        self._selected_markup = idx
+        if self._markup_item:
+            self._markup_item.set_selected(idx)
+
+    @staticmethod
+    def _dist_to_segment(px, py, x0, y0, x1, y1) -> float:
+        dx, dy = x1 - x0, y1 - y0
+        if dx == 0 and dy == 0:
+            return math.hypot(px - x0, py - y0)
+        t = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+    def _markup_hit_test(self, scene_pos):
+        """Return the index of the topmost markup near scene_pos, or None."""
+        if not self._pair or not self._pair.markups:
+            return None
+        W, H = self._canvas_w, self._canvas_h
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale   # ~10 on-screen pixels in scene units
+        px, py = scene_pos.x(), scene_pos.y()
+        for i in range(len(self._pair.markups) - 1, -1, -1):
+            m = self._pair.markups[i]
+            pts = [(p[0] * W, p[1] * H) for p in m.get('points', [])]
+            if len(pts) < 2:
+                continue
+            (x0, y0), (x1, y1) = pts[0], pts[1]
+            if m.get('type') == 'line':
+                if self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol:
+                    return i
+            else:
+                xmin, xmax = min(x0, x1), max(x0, x1)
+                ymin, ymax = min(y0, y1), max(y0, y1)
+                if xmin - tol <= px <= xmax + tol and ymin - tol <= py <= ymax + tol:
+                    return i
+        return None
+
+    def markup_delete_selected(self):
+        if (self._pair and self._selected_markup is not None
+                and 0 <= self._selected_markup < len(self._pair.markups)):
+            del self._pair.markups[self._selected_markup]
+            self._select_markup(None)
+            if self._markup_item:
+                self._markup_item.set_markups(self._pair.markups)
+            self.markups_changed.emit()
+
     def markup_undo(self):
         if self._pair and self._pair.markups:
             self._pair.markups.pop()
+            self._select_markup(None)
             if self._markup_item:
                 self._markup_item.set_markups(self._pair.markups)
             self.markups_changed.emit()
@@ -294,9 +378,17 @@ class OverlayCanvas(QGraphicsView):
     def markup_clear(self):
         if self._pair and self._pair.markups:
             self._pair.markups.clear()
+            self._select_markup(None)
             if self._markup_item:
                 self._markup_item.set_markups(self._pair.markups)
             self.markups_changed.emit()
+
+    def keyPressEvent(self, event):
+        if (self._mode == self.MODE_MARKUP and self._selected_markup is not None
+                and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)):
+            self.markup_delete_selected()
+            return
+        super().keyPressEvent(event)
 
     def _apply_b_transform(self):
         """Position/rotate/scale the B layer live using a Qt affine transform
@@ -365,7 +457,15 @@ class OverlayCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._mode == self.MODE_MARKUP and self._markup_item is not None:
-                start = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+                scene_pt = self.mapToScene(event.position().toPoint())
+                if self._markup_tool == 'select':
+                    idx = self._markup_hit_test(scene_pt)
+                    self._select_markup(idx)
+                    if idx is not None:
+                        self._select_dragging = True
+                        self._select_last = scene_pt
+                    return
+                start = self._scene_to_norm(scene_pt)
                 self._pending_markup = {
                     'type': self._markup_tool,
                     'points': [start, list(start)],
@@ -390,6 +490,16 @@ class OverlayCanvas(QGraphicsView):
                 int(self.horizontalScrollBar().value() - delta.x()))
             self.verticalScrollBar().setValue(
                 int(self.verticalScrollBar().value() - delta.y()))
+            return
+
+        if self._select_dragging and self._selected_markup is not None:
+            sp = self.mapToScene(event.position().toPoint())
+            dx = (sp.x() - self._select_last.x()) / self._canvas_w
+            dy = (sp.y() - self._select_last.y()) / self._canvas_h
+            self._select_last = sp
+            m = self._pair.markups[self._selected_markup]
+            m['points'] = [[p[0] + dx, p[1] + dy] for p in m['points']]
+            self._markup_item.set_markups(self._pair.markups)
             return
 
         if self._pending_markup is not None:
@@ -437,6 +547,10 @@ class OverlayCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._select_dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._select_dragging = False
+            self.markups_changed.emit()   # committed move
+            return
         if self._pending_markup is not None and event.button() == Qt.MouseButton.LeftButton:
             p0, p1 = self._pending_markup['points']
             # Discard accidental tiny marks.
@@ -717,8 +831,16 @@ class OverlayViewer(QWidget):
 
         # Markups section
         markup_section = CollapsibleSection("Markups", collapsed=True)
-        tool_row = QHBoxLayout()
         self.markup_btns = {}
+
+        select_btn = QPushButton("◈ Select / Move")
+        select_btn.setCheckable(True)
+        select_btn.setStyleSheet(self._toggle_btn_style())
+        select_btn.clicked.connect(lambda: self._set_markup_tool('select'))
+        self.markup_btns['select'] = select_btn
+        markup_section.addWidget(select_btn)
+
+        tool_row = QHBoxLayout()
         for key, label in [('line', '╱ Line'), ('rect', '▭ Box'), ('cloud', '☁ Cloud')]:
             b = QPushButton(label)
             b.setCheckable(True)
@@ -750,16 +872,22 @@ class OverlayViewer(QWidget):
         undo_btn = QPushButton("↶ Undo")
         undo_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
         undo_btn.clicked.connect(self.canvas.markup_undo)
+        del_btn = QPushButton("🗑 Delete")
+        del_btn.setToolTip("Delete the selected markup (or press Delete)")
+        del_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
+        del_btn.clicked.connect(self.canvas.markup_delete_selected)
         clear_btn = QPushButton("Clear")
         clear_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
         clear_btn.clicked.connect(self.canvas.markup_clear)
         uc_row.addWidget(undo_btn)
+        uc_row.addWidget(del_btn)
         uc_row.addWidget(clear_btn)
         markup_section.addLayout(uc_row)
 
         markup_section.addWidget(QLabel(
-            "Pick a tool, then drag on the drawing. Pan with right-drag.",
-            styleSheet="color:#666; font-size:9px;"))
+            "Draw tool: drag on the drawing. Select: click a markup to move it; "
+            "Delete key removes it. Pan with right-drag.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
         # Notes section (per drawing)
