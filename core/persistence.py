@@ -106,6 +106,7 @@ def load_settings(settings_path: str) -> dict:
         'pan_button': 'right',     # which mouse button pans: 'left' | 'middle' | 'right'
         'antialiasing': True,      # smooth scaled drawings to soften low-DPI edges
         'canvas_bg': 'white',      # default canvas background: 'white' | 'dark'
+        'tesseract_path': '',      # optional path to tesseract.exe or its folder
     }
     if os.path.exists(settings_path):
         try:

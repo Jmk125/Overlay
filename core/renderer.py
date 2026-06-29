@@ -3,6 +3,8 @@ PDF rendering and overlay compositing engine
 """
 import fitz  # PyMuPDF
 import math
+import os
+import sys
 import numpy as np
 from PIL import Image, ImageChops
 from PyQt6.QtGui import QImage, QPixmap, QColor
@@ -189,6 +191,70 @@ def render_thumbnail(pdf_path: str, page_index: int, max_size: int = 200) -> QPi
     return pil_to_qpixmap(img)
 
 
+def _tesseract_exe_name() -> str:
+    return 'tesseract.exe' if os.name == 'nt' else 'tesseract'
+
+
+def _app_base_dirs() -> list:
+    """Directories to search for a Tesseract bundled alongside the app."""
+    bases = []
+    if getattr(sys, 'frozen', False):
+        # PyInstaller: data is extracted to _MEIPASS; the exe lives elsewhere.
+        bases.append(getattr(sys, '_MEIPASS', ''))
+        bases.append(os.path.dirname(sys.executable))
+    # Project / source root (…/core/renderer.py -> project root)
+    bases.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return [b for b in bases if b]
+
+
+def find_bundled_tesseract() -> str:
+    """Return the path to a Tesseract binary shipped with the app, or ''.
+
+    Looks for a 'tesseract' or 'Tesseract-OCR' folder next to the app (or in the
+    PyInstaller bundle) — just drop the portable Tesseract folder there.
+    """
+    exe = _tesseract_exe_name()
+    for base in _app_base_dirs():
+        for sub in ('tesseract', 'Tesseract-OCR', ''):
+            cand = os.path.join(base, sub, exe) if sub else os.path.join(base, exe)
+            if os.path.exists(cand):
+                return cand
+    return ''
+
+
+def configure_tesseract(explicit_path: str = None) -> bool:
+    """Point pytesseract at a Tesseract binary.
+
+    Resolution order: an explicit path (file or its folder) from settings, then
+    a copy bundled next to the app, otherwise leave pytesseract's default (a
+    system install on PATH). Also sets TESSDATA_PREFIX to the sibling tessdata
+    folder so a bundled copy finds its language files. Returns True if a binary
+    was located and configured here.
+    """
+    try:
+        import pytesseract
+    except Exception:
+        return False
+
+    path = ''
+    if explicit_path:
+        if os.path.isdir(explicit_path):
+            cand = os.path.join(explicit_path, _tesseract_exe_name())
+            path = cand if os.path.exists(cand) else ''
+        elif os.path.exists(explicit_path):
+            path = explicit_path
+    if not path:
+        path = find_bundled_tesseract()
+
+    if path:
+        pytesseract.pytesseract.tesseract_cmd = path
+        tessdata = os.path.join(os.path.dirname(path), 'tessdata')
+        if os.path.isdir(tessdata):
+            os.environ['TESSDATA_PREFIX'] = tessdata
+        return True
+    return False
+
+
 def tesseract_available() -> bool:
     """True if pytesseract is importable and the Tesseract binary is reachable."""
     try:
@@ -197,6 +263,11 @@ def tesseract_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# Auto-detect a bundled Tesseract as soon as the renderer is imported, so a
+# portable copy dropped next to the app works with no configuration.
+configure_tesseract()
 
 
 def render_region_pixmap(pdf_path: str, page_index: int, rect_norm: tuple,
