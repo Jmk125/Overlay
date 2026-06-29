@@ -56,6 +56,10 @@ pip install PyQt6 PyMuPDF Pillow pytesseract
 **Tesseract OCR** (needed for auto sheet matching):
 - Windows: https://github.com/UB-Mannheim/tesseract/wiki
 - After install, ensure `tesseract` is on your PATH
+- The matching screen shows a **live read preview** after you draw the box — if
+  Tesseract isn't found it says so there, and you can still use
+  *Skip OCR — Match Manually*. (OCR reads from the source PDF at 300 DPI, so it
+  doesn't depend on the on-screen preview resolution — just on a tight box.)
 
 ### Run
 
