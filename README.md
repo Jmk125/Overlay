@@ -101,11 +101,16 @@ build.bat
 or directly:
 
 ```bash
-pip install pyinstaller PyQt6 PyMuPDF Pillow numpy pytesseract openpyxl
-pyinstaller DrawingOverlay.spec
+python -m pip install pyinstaller PyQt6 PyMuPDF Pillow numpy pytesseract openpyxl
+python -m PyInstaller DrawingOverlay.spec
 ```
 
 The result is **`dist/DrawingOverlay.exe`** — a single self-contained file.
+
+> **`'pyinstaller' is not recognized`?** Its Scripts folder isn't on your PATH
+> (common with the Microsoft Store build of Python). Run it as a module instead:
+> `python -m PyInstaller DrawingOverlay.spec` (note the capital `PyInstaller`).
+> `build.bat` already does this for you.
 
 The app **auto-detects** the bundled `tesseract/` folder (and `app.ico`) inside
 the packaged exe; no configuration needed. Users can still point to a custom
@@ -115,7 +120,7 @@ Tesseract in **Edit ▸ Preferences ▸ OCR**, which shows a green check when fo
 > separator:
 >
 > ```bash
-> pyinstaller --onefile --windowed --name "DrawingOverlay" ^
+> python -m PyInstaller --onefile --windowed --name "DrawingOverlay" ^
 >   --icon app.ico --add-data "tesseract;tesseract" --add-data "app.ico;." main.py
 > ```
 
