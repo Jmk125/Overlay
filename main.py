@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QApplication, QMenuBar, QMenu
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QFont, QColor, QPalette
+from PyQt6.QtGui import QAction, QFont, QColor, QPalette, QIcon
 
 from core.models import OverlaySet
 from core.persistence import (
@@ -24,12 +24,31 @@ from ui.settings_dialog import SettingsDialog
 SETTINGS_PATH = os.path.expanduser("~/.drawing_overlay/settings.json")
 
 
+def resource_path(name: str):
+    """Locate a bundled resource next to the app, the PyInstaller bundle, or
+    the source tree. Returns the full path, or None if not found."""
+    bases = []
+    if getattr(sys, 'frozen', False):
+        bases.append(getattr(sys, '_MEIPASS', ''))
+        bases.append(os.path.dirname(sys.executable))
+    bases.append(os.path.dirname(os.path.abspath(__file__)))
+    for base in bases:
+        if base:
+            path = os.path.join(base, name)
+            if os.path.exists(path):
+                return path
+    return None
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = load_settings(SETTINGS_PATH)
         # Point OCR at a bundled/explicit Tesseract if one is configured.
         R.configure_tesseract(self.settings.get('tesseract_path'))
+        icon = resource_path('app.ico')
+        if icon:
+            self.setWindowIcon(QIcon(icon))
         self.setWindowTitle("Drawing Overlay Tool")
         self.setMinimumSize(1200, 750)
         self._apply_dark_theme()
@@ -265,6 +284,9 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Drawing Overlay Tool")
     app.setFont(QFont("Segoe UI", 10))
+    icon = resource_path('app.ico')
+    if icon:
+        app.setWindowIcon(QIcon(icon))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

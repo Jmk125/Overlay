@@ -72,57 +72,78 @@ cd drawing_overlay
 python main.py
 ```
 
-### Package to .exe (Windows)
+### Package to a single .exe (Windows)
 
-```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "DrawingOverlay" main.py
+A ready-made PyInstaller spec (`DrawingOverlay.spec`) is included. It bundles
+Tesseract and the icon automatically when they're present.
+
+**1. (Optional) Add a portable Tesseract** so OCR works with no install on the
+user's machine. Tesseract isn't a single file — `tesseract.exe` needs its DLLs
+and a `tessdata/` language folder — but the whole folder is **portable**:
+
+  1. Install the [UB-Mannheim Tesseract build](https://github.com/UB-Mannheim/tesseract/wiki)
+     on **any one** Windows machine.
+  2. Copy the entire install folder (`C:\Program Files\Tesseract-OCR`) into this
+     project as a folder named **`tesseract/`** (so you have
+     `tesseract/tesseract.exe` and `tesseract/tessdata/`).
+  3. To shrink it, delete everything in `tessdata/` except `eng.traineddata`
+     (and `osd.traineddata`).
+
+**2. (Optional) Add your icon** — drop `app.ico` in the project root. It becomes
+both the .exe icon and the window/taskbar icon.
+
+**3. Build** — either run the helper script:
+
+```bat
+build.bat
 ```
 
-The .exe will be in the `dist/` folder.
-
-### Bundling Tesseract (no install needed for end users)
-
-Tesseract isn't a single file — `tesseract.exe` needs its DLLs and a
-`tessdata/` language folder — but the whole folder is **portable**. To ship OCR
-with your app so users don't install anything:
-
-1. Install the [UB-Mannheim Tesseract build](https://github.com/UB-Mannheim/tesseract/wiki)
-   on **any one** Windows machine.
-2. Copy the entire install folder (`C:\Program Files\Tesseract-OCR`) into this
-   project as a folder named **`tesseract/`** (so you have
-   `tesseract/tesseract.exe` and `tesseract/tessdata/`).
-   - To shrink it, you can delete everything in `tessdata/` except
-     `eng.traineddata` (and `osd.traineddata`).
-3. The app **auto-detects** a `tesseract/` (or `Tesseract-OCR/`) folder placed
-   next to `main.py` or next to the built `.exe` — no configuration needed.
-   You can also point to a custom location in **Edit ▸ Preferences ▸ OCR**.
-
-Package it into the build with `--add-data` (Windows uses `;` as the separator):
+or directly:
 
 ```bash
-pyinstaller --onefile --windowed --name "DrawingOverlay" ^
-  --add-data "tesseract;tesseract" main.py
+pip install pyinstaller PyQt6 PyMuPDF Pillow numpy pytesseract openpyxl
+pyinstaller DrawingOverlay.spec
 ```
 
-Preferences ▸ OCR shows a green check when Tesseract is found.
+The result is **`dist/DrawingOverlay.exe`** — a single self-contained file.
+
+The app **auto-detects** the bundled `tesseract/` folder (and `app.ico`) inside
+the packaged exe; no configuration needed. Users can still point to a custom
+Tesseract in **Edit ▸ Preferences ▸ OCR**, which shows a green check when found.
+
+> One-liner equivalent (without the spec). Windows uses `;` as the `--add-data`
+> separator:
+>
+> ```bash
+> pyinstaller --onefile --windowed --name "DrawingOverlay" ^
+>   --icon app.ico --add-data "tesseract;tesseract" --add-data "app.ico;." main.py
+> ```
+
+**Notes**
+- `--onefile` unpacks the bundle (including Tesseract) to a temp folder on each
+  launch, so first start is a little slower. For faster startup, change
+  `DrawingOverlay.spec` to a one-folder build (a `COLLECT` step) — the
+  `tesseract/` folder then sits next to the exe and isn't re-extracted.
+- The build is platform-specific: build the Windows .exe on Windows.
 
 ## Project Structure
 
 ```
 drawing_overlay/
 ├── main.py              # App entry point, main window
+├── DrawingOverlay.spec  # PyInstaller build spec (bundles Tesseract + icon)
+├── build.bat            # One-click Windows build helper
 ├── core/
 │   ├── models.py        # Data models (DrawingPage, OverlayPair, OverlaySet)
-│   ├── renderer.py      # PDF rendering, transform, compositing
-│   └── persistence.py   # Save/load .overlay projects and settings
+│   ├── renderer.py      # PDF rendering, transform, compositing, markups, OCR
+│   └── persistence.py   # Save/load .overlay projects, settings, notes export
 └── ui/
     ├── landing.py       # New overlay / open project screen (drag & drop)
     ├── page_selector.py # PDF page picker with thumbnails
     ├── matching.py      # Sheet matching screen (OCR + manual queue)
-    ├── settings_dialog.py # Preferences (controls, rendering, colors)
+    ├── settings_dialog.py # Preferences (controls, rendering, colors, OCR)
     ├── collapsible.py   # Collapsible section widget for the tools pane
-    └── viewer.py        # Main overlay viewer with all tools
+    └── viewer.py        # Main overlay viewer (align, markups, notes, export)
 ```
 
 ## Settings

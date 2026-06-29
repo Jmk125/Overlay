@@ -9,3 +9,7 @@ Tesseract-OCR/
 build/
 dist/
 *.spec
+!DrawingOverlay.spec
+
+# App icon is supplied locally by the developer
+app.ico
