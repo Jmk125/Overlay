@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSlider, QSplitter, QScrollArea, QFrame,
     QListWidget, QListWidgetItem, QDoubleSpinBox, QSpinBox,
     QFileDialog, QCheckBox, QGroupBox, QMessageBox, QSizePolicy,
-    QLineEdit
+    QLineEdit, QProgressBar
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QThread, QPointF, QRectF, QSizeF, QTimer
@@ -359,13 +359,17 @@ class OverlayViewer(QWidget):
     back_to_matching = pyqtSignal()
     save_project = pyqtSignal(object)  # emits OverlaySet
 
+    MAX_CACHE = 24   # cap on cached pairs to bound memory on large sets
+
     def __init__(self, overlay_set: OverlaySet, settings: dict, parent=None):
         super().__init__(parent)
         self.overlay_set = overlay_set
         self.settings = settings
         self.current_pair_index = 0
-        self._render_worker = None
+        self._render_worker = None        # foreground (current view) worker
+        self._bg_worker = None            # background prefetch worker
         self._worker_pool = []   # keeps workers alive until they finish naturally
+        self._cache = {}         # pair index -> {'a','b','composite','sig'}
         self._dirty = False
         self._needs_fit = True   # fit-to-window only when switching pairs
 
@@ -430,11 +434,30 @@ class OverlayViewer(QWidget):
         root.addWidget(self.left_bar)
         self.left_bar.setVisible(False)
 
-        # ── Center: canvas
+        # ── Center: canvas + activity bar (spans only the canvas column,
+        #    so it widens when the side panes are collapsed) ──
+        center = QWidget()
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+
         self.canvas = OverlayCanvas()
         self.canvas.pair_changed.connect(self._on_pair_changed)
         self.canvas.pair_preview.connect(self._on_pair_preview)
-        root.addWidget(self.canvas, 1)
+        center_layout.addWidget(self.canvas, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)          # indeterminate "busy" animation
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+        self.progress.setStyleSheet("""
+            QProgressBar { background: #161616; border: none; }
+            QProgressBar::chunk { background: #3a6491; }
+        """)
+        self.progress.setVisible(False)
+        center_layout.addWidget(self.progress)
+
+        root.addWidget(center, 1)
 
         # Thin strip shown when the right panel is collapsed.
         self.right_bar = self._make_collapsed_bar("‹", "Show tools",
@@ -667,7 +690,20 @@ class OverlayViewer(QWidget):
         # Update controls from pair state
         self._update_controls_from_pair(pair)
         self._needs_fit = True   # new pair -> fit to window once
-        self._do_render()
+
+        cached = self._cache.get(index)
+        if cached and cached['sig'] == self._pair_sig(pair):
+            # Instant: reuse the already-rendered pixmaps for this pair.
+            self.canvas.load_pixmaps(cached['a'], cached['b'], cached['composite'],
+                                     pair, reset_view=True)
+            self._needs_fit = False
+            self._restore_view()
+            self.canvas.show_committed()
+            self._set_progress(False)
+            self.render_status.setText("Ready  (1=overlay  2=A only  3=B only)")
+            self._schedule_prefetch()
+        else:
+            self._do_render()
 
     def _update_controls_from_pair(self, pair: OverlayPair):
         self.rot_spin.blockSignals(True)
@@ -699,50 +735,199 @@ class OverlayViewer(QWidget):
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
 
+    # ── Rendering, caching & background prefetch ──────────────────
+    def _pair_sig(self, pair: OverlayPair) -> tuple:
+        """A signature of everything the rendered composite depends on. Two
+        identical signatures => the cached pixmaps are still valid."""
+        s = self.overlay_set
+        return (
+            round(pair.offset_x, 2), round(pair.offset_y, 2),
+            round(pair.rotation, 3),
+            round(pair.pivot_x, 4), round(pair.pivot_y, 4),
+            round(pair.scale_factor, 5),
+            s.color_a, s.color_b, s.shared_color, s.render_dpi,
+        )
+
+    def _restore_view(self):
+        """Re-apply the currently selected view (composite / A / B)."""
+        for k, btn in self.view_btns.items():
+            if btn.isChecked():
+                self.canvas.set_view_mode(k)
+                return
+        self.canvas.set_view_mode('composite')
+
+    def _set_progress(self, busy: bool):
+        self.progress.setVisible(busy)
+
+    def _set_status_idle(self):
+        """Show the cache progress if prefetch is still working, else Ready."""
+        n = len(self.overlay_set.pairs)
+        cached = self._cached_count()
+        if cached < n:
+            self.render_status.setText(f"Ready — caching pages in background ({cached}/{n})")
+        else:
+            self.render_status.setText("Ready  (1=overlay  2=A only  3=B only)")
+
+    def _cached_count(self) -> int:
+        return sum(1 for i, p in enumerate(self.overlay_set.pairs)
+                   if (self._cache.get(i) or {}).get('sig') == self._pair_sig(p))
+
     def _do_render(self):
+        """Foreground render of the current pair (the user is waiting on it)."""
         if not self.overlay_set.pairs:
             return
+        idx = self.current_pair_index
         pair = self._current_pair()
-        self.render_status.setText("Rendering...")
+        self._set_progress(True)
+        self.render_status.setText("Rendering…")
 
-        # Cancel any active worker (it checks self.cancelled so it will stop soon)
+        # Cancel the previous foreground worker, and pause background prefetch
+        # so the CPU goes to what the user is looking at.
         if self._render_worker and self._render_worker.isRunning():
             self._render_worker.cancel()
-            # Don't wait — let it finish on its own; _worker_pool keeps it alive
+        self._cancel_bg()
 
-        # Purge finished workers from the pool
         self._worker_pool = [w for w in self._worker_pool if w.isRunning()]
 
         worker = RenderWorker(pair, self.overlay_set)
-        worker.done.connect(self._on_render_done)
-        # When finished, remove from pool
-        worker.finished.connect(lambda w=worker: self._worker_pool.remove(w) if w in self._worker_pool else None)
+        worker.index = idx
+        worker.sig = self._pair_sig(pair)
+        worker.done.connect(lambda a, b, c, w=worker: self._on_render_done(w, a, b, c))
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
         self._render_worker = worker
         self._worker_pool.append(worker)
         worker.start()
 
-    def _on_render_done(self, pix_a, pix_b, pix_composite):
-        # Ignore results from a worker that was cancelled
-        sender = self.sender()
-        if sender and getattr(sender, 'cancelled', False):
+    def _on_worker_finished(self, worker):
+        """A render thread fully ended; reclaim it and resume prefetch (now
+        that the CPU is free)."""
+        if worker in self._worker_pool:
+            self._worker_pool.remove(worker)
+        self._schedule_prefetch()
+
+    def _on_render_done(self, worker, pix_a, pix_b, pix_composite):
+        if getattr(worker, 'cancelled', False):
             return
         if pix_composite is None:
+            self._set_progress(False)
             self.render_status.setText("Render failed — check console")
             return
         # Don't rebuild the scene mid-drag (it would disrupt the live item).
         # A fresh render is triggered on release, so dropping this is safe.
         if self.canvas._b_dragging:
             return
-        pair = self._current_pair()
-        self.canvas.load_pixmaps(pix_a, pix_b, pix_composite, pair,
-                                 reset_view=self._needs_fit)
-        self._needs_fit = False
-        self._set_view(list(self.view_btns.keys())[
-            next(i for i, (k, btn) in enumerate(self.view_btns.items()) if btn.isChecked())
-        ])
-        # Flatten: drop the live colored layers now that the composite is fresh.
-        self.canvas.show_committed()
-        self.render_status.setText("Ready  (1=overlay  2=A only  3=B only)")
+
+        self._store_cache(worker.index, pix_a, pix_b, pix_composite, worker.sig)
+
+        # Only paint it if this result is still the pair on screen.
+        if worker.index == self.current_pair_index:
+            pair = self._current_pair()
+            self.canvas.load_pixmaps(pix_a, pix_b, pix_composite, pair,
+                                     reset_view=self._needs_fit)
+            self._needs_fit = False
+            self._restore_view()
+            # Flatten: drop the live colored layers now the composite is fresh.
+            self.canvas.show_committed()
+            self._set_progress(False)
+
+        self._set_status_idle()
+        self._schedule_prefetch()
+
+    def _store_cache(self, index: int, pix_a, pix_b, pix_composite, sig):
+        self._cache[index] = {'a': pix_a, 'b': pix_b,
+                              'composite': pix_composite, 'sig': sig}
+        self._evict_cache()
+
+    def _evict_cache(self):
+        """Keep at most MAX_CACHE entries, dropping those farthest from the
+        current pair first (never the current one)."""
+        if len(self._cache) <= self.MAX_CACHE:
+            return
+        cur = self.current_pair_index
+        # Sort cached indices by distance from current, keep the nearest.
+        victims = sorted(self._cache.keys(), key=lambda i: -abs(i - cur))
+        for idx in victims:
+            if len(self._cache) <= self.MAX_CACHE:
+                break
+            if idx != cur:
+                self._cache.pop(idx, None)
+
+    def _invalidate_cache(self, index: int = None):
+        """Drop one pair's cache (index given) or the whole cache (None)."""
+        if index is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(index, None)
+
+    def _prefetch_order(self) -> list:
+        """Indices to prefetch, nearest to the current pair first."""
+        cur = self.current_pair_index
+        n = len(self.overlay_set.pairs)
+        order = []
+        for d in range(1, n):
+            for idx in (cur + d, cur - d):
+                if 0 <= idx < n:
+                    order.append(idx)
+        return order
+
+    def _schedule_prefetch(self):
+        """Kick off one background render of the nearest uncached pair, if the
+        foreground is idle and we aren't already prefetching."""
+        if self._render_worker and self._render_worker.isRunning():
+            return
+        if self._bg_worker and self._bg_worker.isRunning():
+            return
+        if len(self._cache) >= self.MAX_CACHE:
+            return  # cache full — don't thrash
+        for idx in self._prefetch_order():
+            pair = self.overlay_set.pairs[idx]
+            c = self._cache.get(idx)
+            if not (c and c['sig'] == self._pair_sig(pair)):
+                self._start_bg_render(idx)
+                return
+        self._set_status_idle()
+
+    def _start_bg_render(self, index: int):
+        pair = self.overlay_set.pairs[index]
+        self._worker_pool = [w for w in self._worker_pool if w.isRunning()]
+        worker = RenderWorker(pair, self.overlay_set)
+        worker.index = index
+        worker.sig = self._pair_sig(pair)
+        worker.done.connect(lambda a, b, c, w=worker: self._on_bg_done(w, a, b, c))
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._bg_worker = worker
+        self._worker_pool.append(worker)
+        worker.start()
+        self._set_status_idle()
+
+    def _on_bg_done(self, worker, pix_a, pix_b, pix_composite):
+        if getattr(worker, 'cancelled', False):
+            return
+        if pix_composite is not None:
+            self._store_cache(worker.index, pix_a, pix_b, pix_composite, worker.sig)
+        self._set_status_idle()
+        # Chain to the next uncached pair.
+        self._schedule_prefetch()
+
+    def _cancel_bg(self):
+        if self._bg_worker and self._bg_worker.isRunning():
+            self._bg_worker.cancel()
+        self._bg_worker = None
+
+    def _shutdown(self):
+        """Cancel and join all render threads before this screen is destroyed."""
+        self._cancel_bg()
+        for w in list(self._worker_pool):
+            try:
+                w.cancel()
+            except Exception:
+                pass
+        for w in list(self._worker_pool):
+            try:
+                if w.isRunning():
+                    w.wait(1500)
+            except Exception:
+                pass
 
     def set_background_mode(self, mode: str):
         """Switch canvas background between 'white' and 'dark', flipping the
@@ -753,6 +938,8 @@ class OverlayViewer(QWidget):
         white = (mode == 'white')
         self.overlay_set.shared_color = '#000000' if white else '#ffffff'
         self.canvas.set_background(white)
+        # Shared-line color affects every pair — invalidate the whole cache.
+        self._invalidate_cache()
         # Re-render so shared line color updates
         self._do_render()
 
@@ -835,6 +1022,8 @@ class OverlayViewer(QWidget):
 
     def _on_pair_changed(self):
         # Committed change (drag release, nudge, spinbox, scale, reset).
+        # The current pair's cached render is now stale.
+        self._invalidate_cache(self.current_pair_index)
         # Update the live B layer immediately, then debounce the heavier
         # shared-line composite recompute.
         pair = self._current_pair()

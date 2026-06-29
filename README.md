@@ -11,6 +11,8 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Color compositing** — shared lines = black; Set A only = your color; Set B only = your color
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
 - **Real-time alignment** — Drawing B moves and rotates live under the cursor (GPU-accelerated layer transforms); the full color composite is recomputed only when you release
+- **Fast batch navigation** — rendered pages are cached (instant when you return to one) and nearby pages are pre-rendered in the background so they're ready before you reach them
+- **Activity indicator** — a slim progress bar under the canvas shows whenever the current view is rendering
 - **Click & drag alignment** — move Drawing B with left-click drag; Shift for fine movement
 - **Rotation** — quick 90°/45° buttons, or free-rotate with click-drag around adjustable pivot point
 - **Collapsible UI** — collapse the pairs pane, the tools pane, and each tool section (View / Align / Rotation / Scale / Export) to keep the workspace clean
