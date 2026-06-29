@@ -8,8 +8,9 @@ from PyQt6.QtWidgets import (
     QGroupBox, QScrollArea
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
-from PyQt6.QtGui import QColor, QFont, QPixmap, QPainter
+from PyQt6.QtGui import QColor, QFont, QPixmap, QPainter, QImage
 import os
+import uuid
 from core.models import DrawingPage, OverlaySet
 from core import renderer as R
 
@@ -184,7 +185,7 @@ class LandingScreen(QWidget):
         status.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(status)
 
-        status.setText("No files loaded — or drag & drop PDFs here")
+        status.setText("No files loaded — or drag & drop a PDF or image here")
 
         panel = {
             'widget': group,
@@ -243,37 +244,95 @@ class LandingScreen(QWidget):
             panel['status'].setText(f"{len(pages)} page(s) selected from {os.path.basename(path)}")
 
     # ── Drag & drop ───────────────────────────────────────────────
+    # Windows clipboard format some apps use to drag a "virtual" file (a page
+    # that isn't a file on disk yet) — exposed by Qt under this MIME name.
+    WIN_FILECONTENTS = 'application/x-qt-windows-mime;value="FileContents"'
+    IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif')
+
     def _pdf_urls(self, mime) -> list:
         if not mime.hasUrls():
             return []
         return [u.toLocalFile() for u in mime.urls()
                 if u.toLocalFile().lower().endswith('.pdf')]
 
+    def _image_urls(self, mime) -> list:
+        if not mime.hasUrls():
+            return []
+        return [u.toLocalFile() for u in mime.urls()
+                if u.toLocalFile().lower().endswith(self.IMAGE_EXTS)]
+
+    def _virtual_pdf_bytes(self, mime):
+        """Bytes of a PDF dragged as a Windows virtual file, or None."""
+        try:
+            if mime.hasFormat(self.WIN_FILECONTENTS):
+                data = bytes(mime.data(self.WIN_FILECONTENTS))
+                if data[:5] == b'%PDF-':
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def _droppable(self, mime) -> bool:
+        return bool(self._pdf_urls(mime)) or bool(self._image_urls(mime)) \
+            or mime.hasImage() or self._virtual_pdf_bytes(mime) is not None
+
     def dragEnterEvent(self, event):
-        if self._pdf_urls(event.mimeData()):
+        if self._droppable(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if self._pdf_urls(event.mimeData()):
+        if self._droppable(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        paths = self._pdf_urls(event.mimeData())
-        if not paths:
-            event.ignore()
-            return
-        # Decide which set the files were dropped onto by position.
+        mime = event.mimeData()
         pos = event.position().toPoint()
         if self.panel_b['widget'].geometry().contains(pos):
             side, panel = 'b', self.panel_b
         else:
             side, panel = 'a', self.panel_a
-        self._handle_dropped(side, panel, paths)
-        event.acceptProposedAction()
+
+        # 1. Real PDF file(s)
+        paths = self._pdf_urls(mime)
+        if paths:
+            self._handle_dropped(side, panel, paths)
+            event.acceptProposedAction()
+            return
+
+        # 2. A page dragged out as a virtual PDF (some PDF apps do this)
+        data = self._virtual_pdf_bytes(mime)
+        if data:
+            saved = self._save_pdf_bytes(data)
+            if saved:
+                self._handle_dropped(side, panel, [saved])
+                event.acceptProposedAction()
+                return
+
+        # 3. Image file(s) on disk
+        imgs = self._image_urls(mime)
+        if imgs:
+            pdfs = [p for p in (self._image_file_to_pdf(i) for i in imgs) if p]
+            if pdfs:
+                self._load_single_pages(side, panel, pdfs)
+                event.acceptProposedAction()
+                return
+
+        # 4. Rasterized content (a selection / snapshot / page image dragged
+        #    straight out of Bluebeam, Acrobat, etc.)
+        if mime.hasImage():
+            pdf = self._image_to_pdf(mime.imageData())
+            if pdf:
+                self._load_single_pages(side, panel, [pdf])
+                event.acceptProposedAction()
+                return
+
+        # Nothing usable — show what the source offered so it can be supported.
+        self._report_unhandled_drop(mime)
+        event.ignore()
 
     def _handle_dropped(self, side: str, panel: dict, paths: list):
         """A single multi-page PDF opens the page selector; otherwise each
@@ -287,6 +346,64 @@ class LandingScreen(QWidget):
                 self._load_set_from_path(side, panel, paths[0])
                 return
         self._load_single_pages(side, panel, paths)
+
+    # ── Importing dragged images / virtual files ──────────────────
+    def _import_dir(self) -> str:
+        d = os.path.join(os.path.expanduser("~/.drawing_overlay"), "imported")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _save_pdf_bytes(self, data: bytes):
+        try:
+            pdf = os.path.join(self._import_dir(), f"drop_{uuid.uuid4().hex}.pdf")
+            with open(pdf, 'wb') as f:
+                f.write(data)
+            if R.get_page_count(pdf) >= 1:
+                return pdf
+        except Exception:
+            pass
+        return None
+
+    def _image_to_pdf(self, image):
+        """Convert dragged QImage data into a one-page PDF we can render."""
+        try:
+            img = image if isinstance(image, QImage) else QImage(image)
+            if img.isNull():
+                return None
+            base = os.path.join(self._import_dir(), f"drop_{uuid.uuid4().hex}")
+            png = base + ".png"
+            if not img.save(png, "PNG"):
+                return None
+            from PIL import Image
+            pdf = base + ".pdf"
+            Image.open(png).convert("RGB").save(pdf, "PDF", resolution=150.0)
+            try:
+                os.remove(png)
+            except OSError:
+                pass
+            return pdf
+        except Exception:
+            return None
+
+    def _image_file_to_pdf(self, path: str):
+        try:
+            from PIL import Image
+            pdf = os.path.join(self._import_dir(), f"img_{uuid.uuid4().hex}.pdf")
+            Image.open(path).convert("RGB").save(pdf, "PDF", resolution=150.0)
+            return pdf
+        except Exception:
+            return None
+
+    def _report_unhandled_drop(self, mime):
+        fmts = ", ".join(mime.formats()[:14]) or "(none)"
+        QMessageBox.information(
+            self, "Couldn't import that drop",
+            "I couldn't read a PDF or image from that drag.\n\n"
+            "Formats the source app offered:\n" + fmts + "\n\n"
+            "Tip: dragging the PDF file itself (e.g. from Windows Explorer) always "
+            "works. Many PDF apps only hand over an image when you drag a page or "
+            "snapshot — that's supported too. If you expected this to work, send "
+            "me the format list above.")
 
     def _assign_pages(self, side: str, pages):
         if side == 'a':

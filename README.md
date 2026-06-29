@@ -22,7 +22,7 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Save/load project** — .overlay JSON files preserve all transform state, markups and notes
 - **Export** — PNG or PDF export of current overlay (optionally with markups burned in)
 - **Export notes** — File ▸ Export Notes writes an Excel/CSV sheet of notes keyed by sheet number
-- **Drag & drop** — drop PDF files straight onto the Set A / Set B panels
+- **Drag & drop** — drop PDF files, image files, a dragged image/snapshot, or (where the app supports it) a page dragged straight out of Bluebeam/Acrobat onto the Set A / Set B panels
 - **Customizable controls** — set zoom (scroll vs. Ctrl+scroll), pan button (left/middle/right), and edge antialiasing in Preferences
 
 ## Keyboard Shortcuts
