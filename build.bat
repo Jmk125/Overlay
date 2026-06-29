@@ -25,7 +25,7 @@ echo Using Python: %PY%
 
 echo.
 echo Installing/updating build dependencies...
-%PY% -m pip install --upgrade pyinstaller PyQt6 PyMuPDF Pillow numpy pytesseract openpyxl
+%PY% -m pip install --upgrade pyinstaller PyQt6 PyMuPDF Pillow numpy pytesseract openpyxl psutil
 if errorlevel 1 (
   echo ERROR: dependency install failed.
   pause
