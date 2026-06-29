@@ -50,11 +50,12 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - Pillow
 - pytesseract + Tesseract OCR (for sheet number auto-matching)
 - openpyxl (optional — for Export Notes to .xlsx; without it, notes export as .csv)
+- psutil (optional — for "From open PDF", which imports a sheet already open in Bluebeam/Acrobat)
 
 ### Install dependencies
 
 ```bash
-pip install PyQt6 PyMuPDF Pillow pytesseract openpyxl
+pip install PyQt6 PyMuPDF Pillow pytesseract openpyxl psutil
 ```
 
 **Tesseract OCR** (needed for auto sheet matching):

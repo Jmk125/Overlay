@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QFileDialog,
     QColorDialog, QFrame, QSizePolicy, QMessageBox, QSpinBox,
-    QGroupBox, QScrollArea
+    QGroupBox, QScrollArea, QDialog, QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QPixmap, QPainter, QImage
@@ -66,6 +66,46 @@ class PageListWidget(QWidget):
             label = p.sheet_number if p.sheet_number else p.display_name
             item = QListWidgetItem(f"  {label}  —  {os.path.basename(p.pdf_path)}")
             self.list_widget.addItem(item)
+
+
+class OpenPdfPickerDialog(QDialog):
+    """Lists PDFs currently open in other apps; returns the chosen path."""
+    def __init__(self, items: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Import from an open PDF")
+        self.setMinimumWidth(520)
+        self.setStyleSheet("background:#161616; color:#e0e0e0;")
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("PDFs currently open in Bluebeam / Acrobat / etc.:"))
+        self.list = QListWidget()
+        self.list.setStyleSheet("background:#1e1e1e; color:#eee; border:1px solid #444;")
+        for it in items:
+            label = f"{os.path.basename(it['path'])}    —    {it['app']}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, it['path'])
+            item.setToolTip(it['path'])
+            self.list.addItem(item)
+        if items:
+            self.list.setCurrentRow(0)
+        self.list.itemDoubleClicked.connect(self.accept)
+        layout.addWidget(self.list)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        cancel.setStyleSheet("background:#444; color:#ddd; border:none; padding:6px 14px; border-radius:4px;")
+        ok = QPushButton("Use This PDF")
+        ok.clicked.connect(self.accept)
+        ok.setStyleSheet("background:#1a6b35; color:white; border:none; padding:6px 14px; border-radius:4px;")
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        layout.addLayout(row)
+
+    def selected_path(self):
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
 class LandingScreen(QWidget):
@@ -178,6 +218,11 @@ class LandingScreen(QWidget):
         load_set_btn.setStyleSheet(self._btn_style("#2a2a5e", "#3a3a8e"))
         layout.addWidget(load_set_btn)
 
+        from_open_btn = QPushButton("📄 From open PDF (Bluebeam / Acrobat)")
+        from_open_btn.setToolTip("Pick a PDF that's currently open in another app")
+        from_open_btn.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
+        layout.addWidget(from_open_btn)
+
         page_list = PageListWidget("")
         layout.addWidget(page_list)
 
@@ -197,8 +242,40 @@ class LandingScreen(QWidget):
 
         load_single_btn.clicked.connect(lambda: self._load_single(side, panel))
         load_set_btn.clicked.connect(lambda: self._load_set(side, panel))
+        from_open_btn.clicked.connect(lambda: self._load_from_open_app(side, panel))
 
         return panel
+
+    def _load_from_open_app(self, side: str, panel: dict):
+        """Pick a PDF currently open in Bluebeam/Acrobat/etc. and load it."""
+        from core import openpdf
+        if not openpdf.psutil_available():
+            QMessageBox.information(
+                self, "Feature needs psutil",
+                "Detecting open PDFs needs the 'psutil' package.\n\n"
+                "Install it with:\n    pip install psutil\n\n"
+                "(It's included automatically in the packaged .exe build.)")
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            items = openpdf.list_open_pdfs()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not items:
+            QMessageBox.information(
+                self, "No open PDFs found",
+                "I couldn't find a PDF open in another app.\n\n"
+                "Make sure the drawing is open in Bluebeam/Acrobat, then try "
+                "again. If it still doesn't appear, use “Load Single PDF”.")
+            return
+
+        dlg = OpenPdfPickerDialog(items, self)
+        if dlg.exec():
+            path = dlg.selected_path()
+            if path and os.path.exists(path):
+                self._handle_dropped(side, panel, [path])
 
     def _load_single(self, side: str, panel: dict):
         paths, _ = QFileDialog.getOpenFileNames(
