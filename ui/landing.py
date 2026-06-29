@@ -261,20 +261,37 @@ class LandingScreen(QWidget):
         return [u.toLocalFile() for u in mime.urls()
                 if u.toLocalFile().lower().endswith(self.IMAGE_EXTS)]
 
-    def _virtual_pdf_bytes(self, mime):
-        """Bytes of a PDF dragged as a Windows virtual file, or None."""
-        try:
-            if mime.hasFormat(self.WIN_FILECONTENTS):
-                data = bytes(mime.data(self.WIN_FILECONTENTS))
-                if data[:5] == b'%PDF-':
-                    return data
-        except Exception:
-            pass
+    def _extract_filecontents(self, mime):
+        """Try to pull PDF bytes from any 'FileContents' drag format (how apps
+        like Bluebeam drag a page out as a virtual file). Returns bytes or None."""
+        for fmt in mime.formats():
+            if 'filecontents' in fmt.lower():
+                try:
+                    data = bytes(mime.data(fmt))
+                except Exception:
+                    continue
+                if not data:
+                    continue
+                idx = data.find(b'%PDF-')   # some wrappers prepend bytes
+                if idx != -1:
+                    return data[idx:]
+                return data   # let the PDF reader try anyway
         return None
 
+    def _has_file_descriptor(self, mime) -> bool:
+        """A Windows virtual-file drag (descriptor/contents) is present."""
+        for f in mime.formats():
+            fl = f.lower()
+            if 'filegroupdescriptor' in fl or 'filecontents' in fl:
+                return True
+        return False
+
     def _droppable(self, mime) -> bool:
+        # Accept anything we might be able to use — including a virtual-file
+        # drag, so the drop is allowed and we can inspect/extract it (otherwise
+        # the OS shows the "no drop" cursor and dropEvent never fires).
         return bool(self._pdf_urls(mime)) or bool(self._image_urls(mime)) \
-            or mime.hasImage() or self._virtual_pdf_bytes(mime) is not None
+            or mime.hasImage() or self._has_file_descriptor(mime)
 
     def dragEnterEvent(self, event):
         if self._droppable(event.mimeData()):
@@ -303,8 +320,8 @@ class LandingScreen(QWidget):
             event.acceptProposedAction()
             return
 
-        # 2. A page dragged out as a virtual PDF (some PDF apps do this)
-        data = self._virtual_pdf_bytes(mime)
+        # 2. A page dragged out as a virtual PDF (e.g. Bluebeam thumbnail)
+        data = self._extract_filecontents(mime)
         if data:
             saved = self._save_pdf_bytes(data)
             if saved:
@@ -395,15 +412,22 @@ class LandingScreen(QWidget):
             return None
 
     def _report_unhandled_drop(self, mime):
-        fmts = ", ".join(mime.formats()[:14]) or "(none)"
+        lines = []
+        for f in mime.formats():
+            try:
+                n = len(bytes(mime.data(f)))
+            except Exception:
+                n = -1
+            lines.append(f"• {f}  ({n} bytes)")
+        body = "\n".join(lines) or "(none)"
         QMessageBox.information(
             self, "Couldn't import that drop",
-            "I couldn't read a PDF or image from that drag.\n\n"
-            "Formats the source app offered:\n" + fmts + "\n\n"
-            "Tip: dragging the PDF file itself (e.g. from Windows Explorer) always "
-            "works. Many PDF apps only hand over an image when you drag a page or "
-            "snapshot — that's supported too. If you expected this to work, send "
-            "me the format list above.")
+            "I couldn't extract a PDF or image from that drag.\n\n"
+            "Formats the source app offered:\n" + body + "\n\n"
+            "If there's a 'FileContents' entry showing 0 bytes, the app handed "
+            "over a virtual file that Qt can't read directly — send me this list "
+            "and I'll add a Windows-specific reader for it.\n\n"
+            "Tip: dragging the actual PDF file (from Explorer) always works.")
 
     def _assign_pages(self, side: str, pages):
         if side == 'a':
