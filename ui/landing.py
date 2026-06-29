@@ -299,12 +299,15 @@ class LandingScreen(QWidget):
             QMessageBox.warning(self, "Missing Pages", "Please load pages for both Set A and Set B.")
             return
 
+        bg = self.settings.get('canvas_bg', 'white')
         overlay_set = OverlaySet(
             set_a_label=self.panel_a['name_edit'].text(),
             set_b_label=self.panel_b['name_edit'].text(),
             color_a=self.color_btn_a.color(),
             color_b=self.color_btn_b.color(),
             render_dpi=self.dpi_spin.value(),
+            canvas_bg=bg,
+            shared_color='#000000' if bg == 'white' else '#ffffff',
         )
         overlay_set._pages_a = self.pages_a
         overlay_set._pages_b = self.pages_b

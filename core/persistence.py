@@ -105,6 +105,7 @@ def load_settings(settings_path: str) -> dict:
         'zoom_on_scroll': True,    # True = plain scroll zooms; False = require Ctrl+scroll
         'pan_button': 'right',     # which mouse button pans: 'left' | 'middle' | 'right'
         'antialiasing': True,      # smooth scaled drawings to soften low-DPI edges
+        'canvas_bg': 'white',      # default canvas background: 'white' | 'dark'
     }
     if os.path.exists(settings_path):
         try:

@@ -2,11 +2,42 @@
 PDF rendering and overlay compositing engine
 """
 import fitz  # PyMuPDF
+import math
 import numpy as np
 from PIL import Image, ImageChops
 from PyQt6.QtGui import QImage, QPixmap, QColor
 from PyQt6.QtCore import Qt
 import io
+
+
+def forward_matrix(w: float, h: float, offset_x: float, offset_y: float,
+                   rotation: float, pivot_x: float, pivot_y: float,
+                   scale_factor: float) -> np.ndarray:
+    """
+    Build the 3x3 affine matrix that maps a pixel in Drawing B's own
+    (natural, unscaled) coordinates to the shared canvas coordinates.
+
+    The transform is: scale about the top-left, then rotate by `rotation`
+    degrees about the (scaled) pivot point, then translate by the offset.
+
+    This single matrix is the source of truth for BOTH the live Qt preview
+    (forward map) and the final PIL composite (its inverse), so the two
+    always line up exactly — no jump when a drag is released.
+    """
+    th = math.radians(rotation)
+    cos, sin = math.cos(th), math.sin(th)
+    # Pivot expressed in scaled-image coordinates.
+    cx = pivot_x * w * scale_factor
+    cy = pivot_y * h * scale_factor
+
+    def T(dx, dy):
+        return np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]], dtype=float)
+
+    S = np.array([[scale_factor, 0, 0], [0, scale_factor, 0], [0, 0, 1]], dtype=float)
+    # Clockwise-positive rotation in the image's y-down coordinate system.
+    Rm = np.array([[cos, -sin, 0], [sin, cos, 0], [0, 0, 1]], dtype=float)
+
+    return T(offset_x, offset_y) @ T(cx, cy) @ Rm @ T(-cx, -cy) @ S
 
 
 def render_page(pdf_path: str, page_index: int, dpi: int = 150) -> Image.Image:
@@ -34,31 +65,30 @@ def apply_transform(img: Image.Image, offset_x: float, offset_y: float,
                     rotation: float, pivot_x: float, pivot_y: float,
                     scale_factor: float, canvas_size: tuple) -> Image.Image:
     """
-    Apply rotation (around pivot), scale, and translation to an image.
-    Returns a new image composited onto a transparent canvas of canvas_size.
+    Apply scale, rotation (around the pivot) and translation to an image,
+    rendering the result onto a transparent canvas of canvas_size.
+
+    Uses the same affine matrix as the live Qt preview (see forward_matrix)
+    so the on-screen alignment and the committed composite match exactly.
     """
     w, h = img.size
     cw, ch = canvas_size
 
-    # Scale first
-    if abs(scale_factor - 1.0) > 0.001:
-        new_w = int(w * scale_factor)
-        new_h = int(h * scale_factor)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-        w, h = img.size
+    # Fast path: identity transform — just paste at the origin.
+    if (abs(scale_factor - 1.0) < 1e-6 and abs(rotation) < 1e-6
+            and abs(offset_x) < 1e-6 and abs(offset_y) < 1e-6
+            and (w, h) == (cw, ch)):
+        return img.copy()
 
-    # Rotate around pivot point (pivot is normalized relative to image size)
-    if abs(rotation) > 0.001:
-        pivot_px = (pivot_x * w, pivot_y * h)
-        img = img.rotate(-rotation, expand=True, center=pivot_px, resample=Image.BICUBIC)
-        w, h = img.size
-
-    # Composite onto canvas
-    canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
-    paste_x = int(offset_x)
-    paste_y = int(offset_y)
-    canvas.paste(img, (paste_x, paste_y), img)
-    return canvas
+    M = forward_matrix(w, h, offset_x, offset_y, rotation,
+                       pivot_x, pivot_y, scale_factor)
+    # PIL's AFFINE transform maps output coords -> input coords, so it needs
+    # the inverse of our forward (input -> output) matrix.
+    inv = np.linalg.inv(M)
+    coeffs = (inv[0, 0], inv[0, 1], inv[0, 2],
+              inv[1, 0], inv[1, 1], inv[1, 2])
+    return img.transform((cw, ch), Image.AFFINE, coeffs,
+                         resample=Image.BICUBIC)
 
 
 def composite_overlay(img_a: Image.Image, img_b: Image.Image,
