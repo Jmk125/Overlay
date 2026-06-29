@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSlider, QSplitter, QScrollArea, QFrame,
     QListWidget, QListWidgetItem, QDoubleSpinBox, QSpinBox,
     QFileDialog, QCheckBox, QGroupBox, QMessageBox, QSizePolicy,
-    QLineEdit, QProgressBar
+    QLineEdit, QProgressBar, QColorDialog
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QThread, QPointF, QRectF, QSizeF, QTimer
@@ -18,7 +18,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QApplication
+    QGraphicsEllipseItem, QGraphicsItem, QApplication, QPlainTextEdit
 )
 import math
 import os
@@ -94,6 +94,35 @@ class RenderWorker(QThread):
                 self.done.emit(None, None, None)
 
 
+class MarkupOverlayItem(QGraphicsItem):
+    """A single scene item that paints all of a pair's markups (plus the one
+    currently being drawn). Coordinates are normalized 0-1 to the canvas."""
+    def __init__(self, w: float, h: float):
+        super().__init__()
+        self._w = float(w)
+        self._h = float(h)
+        self._markups = []
+        self._pending = None
+        self.setZValue(1000)   # always above the drawings
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0, 0, self._w, self._h)
+
+    def set_markups(self, markups: list):
+        self._markups = markups
+        self.update()
+
+    def set_pending(self, m):
+        self._pending = m
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        items = list(self._markups)
+        if self._pending:
+            items = items + [self._pending]
+        R.paint_markups(painter, items, self._w, self._h)
+
+
 class OverlayCanvas(QGraphicsView):
     """
     The main canvas.
@@ -104,10 +133,12 @@ class OverlayCanvas(QGraphicsView):
     """
     pair_changed = pyqtSignal()    # committed change -> recompute composite
     pair_preview = pyqtSignal()    # live change during a drag -> no recompute
+    markups_changed = pyqtSignal() # a markup was added / removed
 
     MODE_VIEW = 0
     MODE_MOVE = 1
     MODE_ROTATE = 2
+    MODE_MARKUP = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,6 +170,15 @@ class OverlayCanvas(QGraphicsView):
 
         # Natural (untransformed) size of the B layer pixmap
         self._b_size = None
+
+        # Markups
+        self._markup_item = None
+        self._canvas_w = 1.0
+        self._canvas_h = 1.0
+        self._markup_tool = 'line'        # 'line' | 'rect' | 'cloud'
+        self._markup_color = '#ff3030'
+        self._markup_width = 0.003        # normalized fraction of canvas width
+        self._pending_markup = None
 
         # Live layered preview (A + transformed B) — on while aligning
         self._live = False
@@ -195,6 +235,8 @@ class OverlayCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
         elif mode == self.MODE_ROTATE:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        elif mode == self.MODE_MARKUP:
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         # Selecting a tool does NOT switch to the live colored preview — that
         # only happens while you actually drag (see mousePressEvent). When idle
         # the canvas stays flattened to the composite.
@@ -215,9 +257,46 @@ class OverlayCanvas(QGraphicsView):
         for item in (self._item_a, self._item_b, self._item_composite):
             item.setTransformationMode(mode)
         self._apply_b_transform()
+
+        # Markup overlay sits above everything, sized to the canvas (A page).
+        cw = pix_composite.width() if pix_composite else (pix_a.width() if pix_a else 1)
+        ch = pix_composite.height() if pix_composite else (pix_a.height() if pix_a else 1)
+        self._canvas_w, self._canvas_h = float(cw), float(ch)
+        self._markup_item = MarkupOverlayItem(self._canvas_w, self._canvas_h)
+        self.gscene.addItem(self._markup_item)
+        if pair is not None:
+            self._markup_item.set_markups(pair.markups)
+
         self._update_visibility()
         if reset_view:
             self.fitInView(self.gscene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    # ── Markups ───────────────────────────────────────────────────
+    def set_markup_tool(self, tool: str):
+        self._markup_tool = tool
+
+    def set_markup_color(self, hex_color: str):
+        self._markup_color = hex_color
+
+    def set_markup_width(self, width_norm: float):
+        self._markup_width = width_norm
+
+    def _scene_to_norm(self, scene_pos) -> list:
+        return [scene_pos.x() / self._canvas_w, scene_pos.y() / self._canvas_h]
+
+    def markup_undo(self):
+        if self._pair and self._pair.markups:
+            self._pair.markups.pop()
+            if self._markup_item:
+                self._markup_item.set_markups(self._pair.markups)
+            self.markups_changed.emit()
+
+    def markup_clear(self):
+        if self._pair and self._pair.markups:
+            self._pair.markups.clear()
+            if self._markup_item:
+                self._markup_item.set_markups(self._pair.markups)
+            self.markups_changed.emit()
 
     def _apply_b_transform(self):
         """Position/rotate/scale the B layer live using a Qt affine transform
@@ -273,10 +352,10 @@ class OverlayCanvas(QGraphicsView):
             super().wheelEvent(event)
 
     def _pan_blocked_on_left(self) -> bool:
-        """If panning is bound to the left button, don't pan while an align
-        (move/rotate) mode is active — the left drag belongs to the transform."""
+        """If panning is bound to the left button, don't pan while a tool that
+        uses the left drag (align or markup) is active."""
         return (self._pan_button == Qt.MouseButton.LeftButton
-                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE))
+                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP))
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == self._pan_button and not self._pan_blocked_on_left():
@@ -285,6 +364,16 @@ class OverlayCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._mode == self.MODE_MARKUP and self._markup_item is not None:
+                start = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+                self._pending_markup = {
+                    'type': self._markup_tool,
+                    'points': [start, list(start)],
+                    'color': self._markup_color,
+                    'width': self._markup_width,
+                }
+                self._markup_item.set_pending(self._pending_markup)
+                return
             if self._mode in (self.MODE_MOVE, self.MODE_ROTATE):
                 self._drag_start = self.mapToScene(event.position().toPoint())
                 self._b_dragging = True
@@ -301,6 +390,12 @@ class OverlayCanvas(QGraphicsView):
                 int(self.horizontalScrollBar().value() - delta.x()))
             self.verticalScrollBar().setValue(
                 int(self.verticalScrollBar().value() - delta.y()))
+            return
+
+        if self._pending_markup is not None:
+            cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+            self._pending_markup['points'][1] = cur
+            self._markup_item.set_pending(self._pending_markup)
             return
 
         if event.buttons() & Qt.MouseButton.LeftButton and self._pair:
@@ -342,6 +437,18 @@ class OverlayCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._pending_markup is not None and event.button() == Qt.MouseButton.LeftButton:
+            p0, p1 = self._pending_markup['points']
+            # Discard accidental tiny marks.
+            if abs(p1[0] - p0[0]) > 0.003 or abs(p1[1] - p0[1]) > 0.003:
+                if self._pair is not None:
+                    self._pair.markups.append(self._pending_markup)
+                    self._markup_item.set_markups(self._pair.markups)
+                    self.markups_changed.emit()
+            self._pending_markup = None
+            if self._markup_item:
+                self._markup_item.set_pending(None)
+            return
         if self._panning and event.button() == self._pan_button:
             self._panning = False
             self.set_mode(self._mode)
@@ -372,6 +479,7 @@ class OverlayViewer(QWidget):
         self._cache = {}         # pair index -> {'a','b','composite','sig'}
         self._dirty = False
         self._needs_fit = True   # fit-to-window only when switching pairs
+        self._markup_color = '#ff3030'   # current markup color (mirrors canvas)
 
         self._build_ui()
 
@@ -607,6 +715,63 @@ class OverlayViewer(QWidget):
         scale_section.addWidget(self.scale_status)
         right_layout.addWidget(scale_section)
 
+        # Markups section
+        markup_section = CollapsibleSection("Markups", collapsed=True)
+        tool_row = QHBoxLayout()
+        self.markup_btns = {}
+        for key, label in [('line', '╱ Line'), ('rect', '▭ Box'), ('cloud', '☁ Cloud')]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setStyleSheet(self._toggle_btn_style())
+            b.clicked.connect(lambda _, k=key: self._set_markup_tool(k))
+            self.markup_btns[key] = b
+            tool_row.addWidget(b)
+        markup_section.addLayout(tool_row)
+
+        cw_row = QHBoxLayout()
+        cw_row.addWidget(QLabel("Color:"))
+        self.markup_color_btn = QPushButton()
+        self.markup_color_btn.setFixedSize(40, 22)
+        self.markup_color_btn.clicked.connect(self._pick_markup_color)
+        self._refresh_markup_color_btn()
+        cw_row.addWidget(self.markup_color_btn)
+        cw_row.addWidget(QLabel("Width:"))
+        self.markup_width_spin = QSpinBox()
+        self.markup_width_spin.setRange(1, 20)
+        self.markup_width_spin.setValue(3)
+        self.markup_width_spin.setStyleSheet("background:#2a2a2a; color:#eee; border:1px solid #555;")
+        self.markup_width_spin.valueChanged.connect(
+            lambda v: self.canvas.set_markup_width(v / 1000.0))
+        cw_row.addWidget(self.markup_width_spin)
+        cw_row.addStretch()
+        markup_section.addLayout(cw_row)
+
+        uc_row = QHBoxLayout()
+        undo_btn = QPushButton("↶ Undo")
+        undo_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
+        undo_btn.clicked.connect(self.canvas.markup_undo)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
+        clear_btn.clicked.connect(self.canvas.markup_clear)
+        uc_row.addWidget(undo_btn)
+        uc_row.addWidget(clear_btn)
+        markup_section.addLayout(uc_row)
+
+        markup_section.addWidget(QLabel(
+            "Pick a tool, then drag on the drawing. Pan with right-drag.",
+            styleSheet="color:#666; font-size:9px;"))
+        right_layout.addWidget(markup_section)
+
+        # Notes section (per drawing)
+        notes_section = CollapsibleSection("Notes (this drawing)", collapsed=True)
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setPlaceholderText("Notes for this drawing — saved with the project.")
+        self.notes_edit.setFixedHeight(110)
+        self.notes_edit.setStyleSheet("background:#1e1e1e; color:#eee; border:1px solid #444;")
+        self.notes_edit.textChanged.connect(self._on_notes_changed)
+        notes_section.addWidget(self.notes_edit)
+        right_layout.addWidget(notes_section)
+
         # Always-visible quick actions
         reset_btn = QPushButton("Reset All Transforms")
         reset_btn.setStyleSheet("background: #5e2a2a; color: white; border: none; padding: 5px; border-radius: 4px;")
@@ -624,6 +789,11 @@ class OverlayViewer(QWidget):
         save_btn.setStyleSheet("background: #1a6b35; color: white; border: none; padding: 6px; border-radius: 4px;")
         save_btn.clicked.connect(lambda: self.save_project.emit(self.overlay_set))
         export_section.addWidget(save_btn)
+
+        self.include_markups_chk = QCheckBox("Include markups in export")
+        self.include_markups_chk.setChecked(True)
+        self.include_markups_chk.setStyleSheet("color:#ccc;")
+        export_section.addWidget(self.include_markups_chk)
 
         export_png_btn = QPushButton("Export PNG")
         export_png_btn.setStyleSheet("background: #2a4a6b; color: white; border: none; padding: 5px; border-radius: 4px;")
@@ -734,6 +904,11 @@ class OverlayViewer(QWidget):
                 self.scale_b_combo.setCurrentIndex(idx)
             else:
                 self.scale_b_combo.setCurrentText(pair.scale_b)
+
+        # Load this drawing's notes into the editor.
+        self.notes_edit.blockSignals(True)
+        self.notes_edit.setPlainText(pair.notes or "")
+        self.notes_edit.blockSignals(False)
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
@@ -964,6 +1139,33 @@ class OverlayViewer(QWidget):
             self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
             self.move_btn.setChecked(False)
             self.rotate_btn.setChecked(False)
+        # Leaving markup mode — clear the markup tool buttons.
+        for b in self.markup_btns.values():
+            b.setChecked(False)
+
+    def _set_markup_tool(self, tool: str):
+        self.canvas.set_markup_tool(tool)
+        self.canvas.set_mode(OverlayCanvas.MODE_MARKUP)
+        for k, b in self.markup_btns.items():
+            b.setChecked(k == tool)
+        # Markup mode is exclusive with the align tools.
+        self.move_btn.setChecked(False)
+        self.rotate_btn.setChecked(False)
+
+    def _pick_markup_color(self):
+        c = QColorDialog.getColor(QColor(self._markup_color), self, "Markup Color")
+        if c.isValid():
+            self._markup_color = c.name()
+            self.canvas.set_markup_color(self._markup_color)
+            self._refresh_markup_color_btn()
+
+    def _refresh_markup_color_btn(self):
+        self.markup_color_btn.setStyleSheet(
+            f"background:{self._markup_color}; border:1px solid #777; border-radius:3px;")
+
+    def _on_notes_changed(self):
+        if 0 <= self.current_pair_index < len(self.overlay_set.pairs):
+            self._current_pair().notes = self.notes_edit.toPlainText()
 
     def _nudge(self, dx: int, dy: int):
         pair = self._current_pair()
@@ -1063,6 +1265,14 @@ class OverlayViewer(QWidget):
             bg = Image.new("RGBA", composite.size, (255, 255, 255, 255))
             bg.paste(composite, mask=composite)
             final = bg.convert("RGB")
+
+            # Optionally burn in the user's markups at export resolution.
+            if self.include_markups_chk.isChecked() and pair.markups:
+                W, H = final.size
+                mk = R.render_markups_pil(pair.markups, W, H)
+                final = final.convert("RGBA")
+                final.alpha_composite(mk)
+                final = final.convert("RGB")
 
             if fmt == 'png':
                 final.save(path)

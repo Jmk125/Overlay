@@ -29,6 +29,8 @@ def save_project(overlay_set: OverlaySet, filepath: str):
             'scale_factor': pair.scale_factor,
             'scale_a': pair.scale_a,
             'scale_b': pair.scale_b,
+            'markups': pair.markups,
+            'notes': pair.notes,
         }
 
     data = {
@@ -84,6 +86,8 @@ def load_project(filepath: str) -> OverlaySet:
             scale_factor=pd.get('scale_factor', 1.0),
             scale_a=pd.get('scale_a', ''),
             scale_b=pd.get('scale_b', ''),
+            markups=pd.get('markups', []) or [],
+            notes=pd.get('notes', '') or '',
         )
         overlay_set.pairs.append(pair)
 
@@ -91,6 +95,49 @@ def load_project(filepath: str) -> OverlaySet:
     overlay_set.unmatched_b = [dict_to_page(d) for d in data.get('unmatched_b', [])]
 
     return overlay_set
+
+
+def export_notes(overlay_set, filepath: str):
+    """Write per-drawing notes to a spreadsheet.
+
+    Each row is (drawing identifier, notes). The identifier is the sheet number
+    (OCR'd or set by page-order matching) when present, else the pair id. Writes
+    .xlsx via openpyxl when available, otherwise falls back to .csv.
+    Returns the path actually written.
+    """
+    rows = []
+    for i, pair in enumerate(overlay_set.pairs):
+        ident = (pair.page_a.sheet_number or pair.page_b.sheet_number
+                 or pair.pair_id or f"Pair {i + 1}")
+        rows.append((ident, pair.notes or ""))
+
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext != '.csv':
+        try:
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Notes"
+            ws.append(["Drawing", "Notes"])
+            for ident, notes in rows:
+                ws.append([ident, notes])
+            ws.column_dimensions['A'].width = 24
+            ws.column_dimensions['B'].width = 80
+            if not filepath.lower().endswith('.xlsx'):
+                filepath += '.xlsx'
+            wb.save(filepath)
+            return filepath
+        except ImportError:
+            # openpyxl missing — write CSV instead (Excel opens it fine).
+            filepath = os.path.splitext(filepath)[0] + '.csv'
+
+    import csv
+    with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Drawing", "Notes"])
+        for ident, notes in rows:
+            writer.writerow([ident, notes])
+    return filepath
 
 
 def load_settings(settings_path: str) -> dict:
