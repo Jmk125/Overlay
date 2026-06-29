@@ -195,8 +195,9 @@ class OverlayCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
         elif mode == self.MODE_ROTATE:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
-        # Show the live layered preview whenever an align tool is active.
-        self._set_live(mode in (self.MODE_MOVE, self.MODE_ROTATE))
+        # Selecting a tool does NOT switch to the live colored preview — that
+        # only happens while you actually drag (see mousePressEvent). When idle
+        # the canvas stays flattened to the composite.
 
     def load_pixmaps(self, pix_a, pix_b, pix_composite, pair: OverlayPair,
                      reset_view: bool = False):
@@ -242,6 +243,13 @@ class OverlayCanvas(QGraphicsView):
         self._live = on
         self._update_visibility()
 
+    def show_committed(self):
+        """Called once the post-drag composite has been re-rendered: drop the
+        live colored layers and show the flattened composite. No-op while a
+        drag is still in progress."""
+        if not self._b_dragging:
+            self._set_live(False)
+
     def _update_visibility(self):
         if not self._item_composite:
             return
@@ -280,6 +288,9 @@ class OverlayCanvas(QGraphicsView):
             if self._mode in (self.MODE_MOVE, self.MODE_ROTATE):
                 self._drag_start = self.mapToScene(event.position().toPoint())
                 self._b_dragging = True
+                # Switch to the live colored layers only for the duration of
+                # the drag; we flatten back to the composite on release.
+                self._set_live(True)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -372,7 +383,7 @@ class OverlayViewer(QWidget):
         # Debounce re-render on transform changes
         self._render_timer = QTimer()
         self._render_timer.setSingleShot(True)
-        self._render_timer.setInterval(400)
+        self._render_timer.setInterval(220)   # debounce before flattening to composite
         self._render_timer.timeout.connect(self._do_render)
 
     def _build_ui(self):
@@ -718,6 +729,10 @@ class OverlayViewer(QWidget):
         if pix_composite is None:
             self.render_status.setText("Render failed — check console")
             return
+        # Don't rebuild the scene mid-drag (it would disrupt the live item).
+        # A fresh render is triggered on release, so dropping this is safe.
+        if self.canvas._b_dragging:
+            return
         pair = self._current_pair()
         self.canvas.load_pixmaps(pix_a, pix_b, pix_composite, pair,
                                  reset_view=self._needs_fit)
@@ -725,6 +740,8 @@ class OverlayViewer(QWidget):
         self._set_view(list(self.view_btns.keys())[
             next(i for i, (k, btn) in enumerate(self.view_btns.items()) if btn.isChecked())
         ])
+        # Flatten: drop the live colored layers now that the composite is fresh.
+        self.canvas.show_committed()
         self.render_status.setText("Ready  (1=overlay  2=A only  3=B only)")
 
     def set_background_mode(self, mode: str):
