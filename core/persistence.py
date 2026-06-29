@@ -101,6 +101,10 @@ def load_settings(settings_path: str) -> dict:
         'export_path': os.path.expanduser('~/Desktop'),
         'last_open_dir': os.path.expanduser('~'),
         'ink_threshold': 30,
+        # ── Viewer controls (configurable in Preferences) ──
+        'zoom_on_scroll': True,    # True = plain scroll zooms; False = require Ctrl+scroll
+        'pan_button': 'right',     # which mouse button pans: 'left' | 'middle' | 'right'
+        'antialiasing': True,      # smooth scaled drawings to soften low-DPI edges
     }
     if os.path.exists(settings_path):
         try:

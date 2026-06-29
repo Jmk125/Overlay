@@ -78,6 +78,7 @@ class LandingScreen(QWidget):
         self.pages_a: list[DrawingPage] = []
         self.pages_b: list[DrawingPage] = []
         self._build_ui()
+        self.setAcceptDrops(True)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -183,8 +184,11 @@ class LandingScreen(QWidget):
         status.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(status)
 
+        status.setText("No files loaded — or drag & drop PDFs here")
+
         panel = {
             'widget': group,
+            'side': side,
             'name_edit': name_edit,
             'page_list': page_list,
             'status': status,
@@ -202,6 +206,10 @@ class LandingScreen(QWidget):
         )
         if not paths:
             return
+        self._load_single_pages(side, panel, paths)
+
+    def _load_single_pages(self, side: str, panel: dict, paths: list):
+        """Load the first page of each given PDF (one drawing per file)."""
         pages = []
         for path in paths:
             pages.append(DrawingPage(pdf_path=path, page_index=0,
@@ -217,6 +225,10 @@ class LandingScreen(QWidget):
         )
         if not path:
             return
+        self._load_set_from_path(side, panel, path)
+
+    def _load_set_from_path(self, side: str, panel: dict, path: str):
+        """Open the page selector for a multi-page PDF and load chosen pages."""
         count = R.get_page_count(path)
         # Show page selector dialog
         from ui.page_selector import PageSelectorDialog
@@ -229,6 +241,52 @@ class LandingScreen(QWidget):
             self._assign_pages(side, pages)
             panel['page_list'].set_pages(pages)
             panel['status'].setText(f"{len(pages)} page(s) selected from {os.path.basename(path)}")
+
+    # ── Drag & drop ───────────────────────────────────────────────
+    def _pdf_urls(self, mime) -> list:
+        if not mime.hasUrls():
+            return []
+        return [u.toLocalFile() for u in mime.urls()
+                if u.toLocalFile().lower().endswith('.pdf')]
+
+    def dragEnterEvent(self, event):
+        if self._pdf_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._pdf_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = self._pdf_urls(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        # Decide which set the files were dropped onto by position.
+        pos = event.position().toPoint()
+        if self.panel_b['widget'].geometry().contains(pos):
+            side, panel = 'b', self.panel_b
+        else:
+            side, panel = 'a', self.panel_a
+        self._handle_dropped(side, panel, paths)
+        event.acceptProposedAction()
+
+    def _handle_dropped(self, side: str, panel: dict, paths: list):
+        """A single multi-page PDF opens the page selector; otherwise each
+        dropped file is loaded as a single drawing (its first page)."""
+        if len(paths) == 1:
+            try:
+                multipage = R.get_page_count(paths[0]) > 1
+            except Exception:
+                multipage = False
+            if multipage:
+                self._load_set_from_path(side, panel, paths[0])
+                return
+        self._load_single_pages(side, panel, paths)
 
     def _assign_pages(self, side: str, pages):
         if side == 'a':
