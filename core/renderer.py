@@ -7,8 +7,10 @@ import os
 import sys
 import numpy as np
 from PIL import Image, ImageChops
-from PyQt6.QtGui import QImage, QPixmap, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import (
+    QImage, QPixmap, QColor, QPainter, QPen, QBrush, QPainterPath
+)
+from PyQt6.QtCore import Qt, QPointF, QRectF
 import io
 
 
@@ -168,6 +170,78 @@ def render_single_colored(img: Image.Image, color: str, threshold: int = 30) -> 
     result = np.zeros((h, w, 4), dtype=np.uint8)
     result[mask] = [rgb[0], rgb[1], rgb[2], 255]
     return Image.fromarray(result, "RGBA")
+
+
+# ── Markup rendering (shared by the on-canvas overlay and export) ──────
+
+def cloud_path(rect: QRectF, bump: float) -> QPainterPath:
+    """Build a revision-cloud path: scalloped bumps bulging outward around a
+    rectangle, using quadratic curves so the direction is easy to control."""
+    x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
+    bump = max(4.0, bump)
+    # Clockwise edges with their outward normals.
+    edges = [
+        ((x0, y0), (x1, y0), (0, -1)),   # top
+        ((x1, y0), (x1, y1), (1, 0)),    # right
+        ((x1, y1), (x0, y1), (0, 1)),    # bottom
+        ((x0, y1), (x0, y0), (-1, 0)),   # left
+    ]
+    path = QPainterPath()
+    path.moveTo(x0, y0)
+    for (sx, sy), (ex, ey), (nx, ny) in edges:
+        length = math.hypot(ex - sx, ey - sy)
+        nb = max(1, int(round(length / (2 * bump))))
+        dx, dy = (ex - sx) / nb, (ey - sy) / nb
+        for i in range(nb):
+            px, py = sx + dx * i, sy + dy * i
+            qx, qy = sx + dx * (i + 1), sy + dy * (i + 1)
+            mx = (px + qx) / 2 + nx * bump
+            my = (py + qy) / 2 + ny * bump
+            path.quadTo(mx, my, qx, qy)
+    path.closeSubpath()
+    return path
+
+
+def paint_markups(painter: QPainter, markups: list, width: int, height: int):
+    """Draw a list of normalized markups onto a QPainter sized width×height."""
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    for m in markups:
+        pts = [(p[0] * width, p[1] * height) for p in m.get('points', [])]
+        if len(pts) < 2:
+            continue
+        pen = QPen(QColor(m.get('color', '#ff0000')))
+        pen.setWidthF(max(1.0, float(m.get('width', 0.003)) * width))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        mtype = m.get('type', 'line')
+        if mtype == 'line':
+            painter.drawLine(QPointF(*pts[0]), QPointF(*pts[1]))
+        elif mtype == 'rect':
+            painter.drawRect(QRectF(QPointF(*pts[0]), QPointF(*pts[1])).normalized())
+        elif mtype == 'cloud':
+            rect = QRectF(QPointF(*pts[0]), QPointF(*pts[1])).normalized()
+            bump = max(6.0, min(rect.width(), rect.height()) * 0.12)
+            painter.drawPath(cloud_path(rect, bump))
+
+
+def render_markups_pil(markups: list, width: int, height: int) -> Image.Image:
+    """Render markups to a transparent RGBA PIL image (for export compositing)."""
+    img = QImage(width, height, QImage.Format.Format_ARGB32)
+    img.fill(0)
+    painter = QPainter(img)
+    paint_markups(painter, markups, width, height)
+    painter.end()
+    # Convert QImage -> PNG bytes -> PIL RGBA
+    from PyQt6.QtCore import QBuffer, QByteArray
+    ba = QByteArray()
+    qbuf = QBuffer(ba)
+    qbuf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(qbuf, "PNG")
+    buf = io.BytesIO(bytes(ba))
+    buf.seek(0)
+    return Image.open(buf).convert("RGBA")
 
 
 def get_page_count(pdf_path: str) -> int:

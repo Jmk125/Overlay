@@ -12,7 +12,9 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QFont, QColor, QPalette
 
 from core.models import OverlaySet
-from core.persistence import load_settings, save_settings, save_project, load_project
+from core.persistence import (
+    load_settings, save_settings, save_project, load_project, export_notes
+)
 from core import renderer as R
 from ui.landing import LandingScreen
 from ui.matching import MatchingScreen
@@ -100,6 +102,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(save_act)
 
         file_menu.addSeparator()
+        export_notes_act = QAction("Export Notes...", self)
+        export_notes_act.triggered.connect(self._export_notes_dialog)
+        file_menu.addAction(export_notes_act)
+
+        file_menu.addSeparator()
         quit_act = QAction("Quit", self)
         quit_act.setShortcut("Ctrl+Q")
         quit_act.triggered.connect(self.close)
@@ -152,6 +159,27 @@ class MainWindow(QMainWindow):
                     pass
             self.stack.removeWidget(w)
             w.deleteLater()
+
+    def _export_notes_dialog(self):
+        if not hasattr(self, '_current_overlay_set') or not self._current_overlay_set.pairs:
+            QMessageBox.information(self, "Export Notes",
+                                    "Open or create an overlay first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Notes",
+            os.path.join(self.settings.get('export_path', ''), "overlay_notes.xlsx"),
+            "Excel (*.xlsx);;CSV (*.csv)")
+        if not path:
+            return
+        try:
+            written = export_notes(self._current_overlay_set, path)
+            note = ""
+            if written.lower().endswith('.csv') and not path.lower().endswith('.csv'):
+                note = "\n\n(openpyxl not installed — wrote a CSV instead, which Excel opens.)"
+            QMessageBox.information(self, "Notes Exported",
+                                    f"Saved to:\n{written}{note}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def _open_settings_dialog(self):
         current = self.stack.currentWidget()

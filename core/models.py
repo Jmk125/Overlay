@@ -38,6 +38,12 @@ class OverlayPair:
     scale_a: str = ""
     scale_b: str = ""
 
+    # User annotations on this pair.
+    # Each markup: {'type': 'line'|'rect'|'cloud', 'points': [[nx,ny],...],
+    #               'color': '#RRGGBB', 'width': float}  (coords normalized 0-1)
+    markups: list = field(default_factory=list)
+    notes: str = ""
+
     def __post_init__(self):
         if not self.pair_id:
             self.pair_id = f"{self.page_a.sheet_number}_{self.page_b.sheet_number}"

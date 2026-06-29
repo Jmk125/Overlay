@@ -17,8 +17,11 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Rotation** — quick 90°/45° buttons, or free-rotate with click-drag around adjustable pivot point
 - **Collapsible UI** — collapse the pairs pane, the tools pane, and each tool section (View / Align / Rotation / Scale / Export) to keep the workspace clean
 - **Auto-scale** — enter drawing scale (e.g. 1/4" = 1') for each set; B is auto-resized to match A
-- **Save/load project** — .overlay JSON files preserve all transform state
-- **Export** — PNG or PDF export of current overlay
+- **Markups** — draw lines, boxes and revision clouds in any color and line weight; per drawing, undo/clear
+- **Per-drawing notes** — jot notes for each sheet; retained when you switch drawings and saved in the project
+- **Save/load project** — .overlay JSON files preserve all transform state, markups and notes
+- **Export** — PNG or PDF export of current overlay (optionally with markups burned in)
+- **Export notes** — File ▸ Export Notes writes an Excel/CSV sheet of notes keyed by sheet number
 - **Drag & drop** — drop PDF files straight onto the Set A / Set B panels
 - **Customizable controls** — set zoom (scroll vs. Ctrl+scroll), pan button (left/middle/right), and edge antialiasing in Preferences
 
@@ -46,11 +49,12 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - PyMuPDF (fitz)
 - Pillow
 - pytesseract + Tesseract OCR (for sheet number auto-matching)
+- openpyxl (optional — for Export Notes to .xlsx; without it, notes export as .csv)
 
 ### Install dependencies
 
 ```bash
-pip install PyQt6 PyMuPDF Pillow pytesseract
+pip install PyQt6 PyMuPDF Pillow pytesseract openpyxl
 ```
 
 **Tesseract OCR** (needed for auto sheet matching):
