@@ -216,6 +216,8 @@ class MatchingScreen(QWidget):
         self.matched_pairs: list[OverlayPair] = []
         self.unmatched_a: list[DrawingPage] = []
         self.unmatched_b: list[DrawingPage] = []
+        self._active_ocr_page: DrawingPage = None   # page shown in the box view
+        self._last_read = ""                         # last preview OCR result
         self._build_ui()
 
     def _build_ui(self):
@@ -228,8 +230,9 @@ class MatchingScreen(QWidget):
         root.addWidget(title)
 
         desc = QLabel(
-            "Draw a box around the sheet number area on the preview below. "
-            "The app will OCR that region on every page to auto-match sheets by number."
+            "Match sheets one of three ways: OCR the sheet number (draw a box "
+            "below), match by PDF page order, or pair them manually. Unread "
+            "sheets land in the queue below — click one to re-draw its box."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -240,9 +243,9 @@ class MatchingScreen(QWidget):
 
         # Left: preview with box drawing
         left_col = QVBoxLayout()
-        ocr_label = QLabel("Draw OCR box on sample page:")
-        ocr_label.setStyleSheet("color: #ddd; font-weight: bold;")
-        left_col.addWidget(ocr_label)
+        self.ocr_label = QLabel("Draw OCR box on sample page:")
+        self.ocr_label.setStyleSheet("color: #ddd; font-weight: bold;")
+        left_col.addWidget(self.ocr_label)
         self.ocr_view = OCRBoxView()
         self.ocr_view.setMinimumSize(400, 400)
         self.ocr_view.box_drawn.connect(self._on_box_drawn)
@@ -266,10 +269,9 @@ class MatchingScreen(QWidget):
         zoom_hint.setStyleSheet("color: #777; font-size: 10px;")
         left_col.addWidget(zoom_hint)
 
-        # Load first page from set A as sample
-        self._sample_page = self.pages_a[0] if self.pages_a else None
-        if self._sample_page:
-            self.ocr_view.load_page(self._sample_page.pdf_path, self._sample_page.page_index)
+        # Load first page from set A as the initial sample
+        if self.pages_a:
+            self._set_active_ocr_page(self.pages_a[0], 'Set A')
 
         top_split.addLayout(left_col, 2)
 
@@ -315,10 +317,22 @@ class MatchingScreen(QWidget):
         self.progress_label.setWordWrap(True)
         right_col.addWidget(self.progress_label)
 
-        right_col.addSpacing(16)
+        right_col.addSpacing(12)
 
-        # Skip OCR option
-        skip_btn = QPushButton("Skip OCR — Match Manually")
+        or_label = QLabel("— or —")
+        or_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        or_label.setStyleSheet("color: #666; font-size: 10px;")
+        right_col.addWidget(or_label)
+
+        # Match by PDF page order (1st A ↔ 1st B, 2nd ↔ 2nd, …)
+        page_order_btn = QPushButton("⇅  Match by Page Order")
+        page_order_btn.setFixedHeight(34)
+        page_order_btn.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
+        page_order_btn.clicked.connect(self._match_by_page_order)
+        right_col.addWidget(page_order_btn)
+
+        # Skip OCR option (manual)
+        skip_btn = QPushButton("Match Manually (no auto-match)")
         skip_btn.setStyleSheet(self._btn_style("#3a3a3a", "#555"))
         skip_btn.clicked.connect(self._skip_to_manual)
         right_col.addWidget(skip_btn)
@@ -331,7 +345,8 @@ class MatchingScreen(QWidget):
         self.unmatched_frame.setVisible(False)
         unmatched_layout = QVBoxLayout(self.unmatched_frame)
 
-        unmatched_title = QLabel("⚠  Unmatched Sheets — Click to pair or dismiss")
+        unmatched_title = QLabel("⚠  Unmatched Sheets — click one to re-draw its OCR box, or pair manually")
+        unmatched_title.setWordWrap(True)
         unmatched_title.setStyleSheet("color: #FFD700; font-weight: bold;")
         unmatched_layout.addWidget(unmatched_title)
 
@@ -342,6 +357,7 @@ class MatchingScreen(QWidget):
         self.unmatched_list_a = QListWidget()
         self.unmatched_list_a.setStyleSheet("background: #1e1e1e; color: #eee; border: 1px solid #555;")
         self.unmatched_list_a.setMaximumHeight(120)
+        self.unmatched_list_a.itemClicked.connect(lambda: self._on_unmatched_clicked('a'))
         um_a_col.addWidget(self.unmatched_list_a)
         queue_row.addLayout(um_a_col)
 
@@ -351,6 +367,13 @@ class MatchingScreen(QWidget):
         pair_btn.clicked.connect(self._manual_pair)
         pair_btn.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
         pair_col.addWidget(pair_btn)
+        # Apply the box's read number to the sheet currently in the OCR view,
+        # then try to re-match it against the other set.
+        self.apply_read_btn = QPushButton("Apply read # ↩")
+        self.apply_read_btn.setToolTip("Set the selected sheet's number to what the OCR box just read, then re-match")
+        self.apply_read_btn.clicked.connect(self._apply_preview_to_active)
+        self.apply_read_btn.setStyleSheet(self._btn_style("#1a6b35", "#27a350"))
+        pair_col.addWidget(self.apply_read_btn)
         edit_a_btn = QPushButton("Edit A #")
         edit_a_btn.clicked.connect(lambda: self._edit_sheet_number('a'))
         edit_a_btn.setStyleSheet(self._btn_style("#3a3a3a", "#555"))
@@ -366,6 +389,7 @@ class MatchingScreen(QWidget):
         self.unmatched_list_b = QListWidget()
         self.unmatched_list_b.setStyleSheet("background: #1e1e1e; color: #eee; border: 1px solid #555;")
         self.unmatched_list_b.setMaximumHeight(120)
+        self.unmatched_list_b.itemClicked.connect(lambda: self._on_unmatched_clicked('b'))
         um_b_col.addWidget(self.unmatched_list_b)
         queue_row.addLayout(um_b_col)
 
@@ -404,14 +428,15 @@ class MatchingScreen(QWidget):
         QTimer.singleShot(30, self._update_preview)
 
     def _update_preview(self):
-        """Render the boxed crop and OCR it on the sample page so the user can
-        confirm the number is being read before running the whole batch."""
-        if not self._sample_page or not self.norm_rect:
+        """Render the boxed crop and OCR it on the page currently in the view so
+        the user can confirm the number is read before committing."""
+        self._last_read = ""
+        page = self._active_ocr_page
+        if not page or not self.norm_rect:
             return
         rect = (self.norm_rect.x(), self.norm_rect.y(),
                 self.norm_rect.x() + self.norm_rect.width(),
                 self.norm_rect.y() + self.norm_rect.height())
-        page = self._sample_page
 
         # Show the cropped region so the user sees exactly what's being OCR'd.
         try:
@@ -424,19 +449,93 @@ class MatchingScreen(QWidget):
         if not R.tesseract_available():
             self.preview_text.setText(
                 "⚠ Tesseract OCR not found. Install it (and ensure it's on your "
-                "PATH), or use “Skip OCR — Match Manually”.")
+                "PATH), or use “Match Manually”.")
             self.preview_text.setStyleSheet("color:#ff8c69; font-size:11px; border:none;")
             return
 
         text = R.ocr_region(page.pdf_path, page.page_index, rect)
+        self._last_read = text
         if text:
-            self.preview_text.setText(f"Read:  “{text}”   — looks good? Run the full match.")
+            self.preview_text.setText(
+                f"Read:  “{text}”   — Run the full match, or “Apply read #” to "
+                "this sheet.")
             self.preview_text.setStyleSheet("color:#27a350; font-size:12px; font-weight:bold; border:none;")
         else:
             self.preview_text.setText(
                 "No text detected. Zoom in and draw a tighter box around just "
                 "the sheet number, then try again.")
             self.preview_text.setStyleSheet("color:#FFD700; font-size:11px; border:none;")
+
+    # ── Active OCR page (sample, or an unmatched sheet being fixed) ────
+    def _set_active_ocr_page(self, page: DrawingPage, side_label: str):
+        self._active_ocr_page = page
+        name = page.sheet_number or page.display_name
+        self.ocr_label.setText(f"Draw OCR box — {side_label}: {name}")
+        self.ocr_view.load_page(page.pdf_path, page.page_index)
+        # Re-run the preview on the newly loaded page if a box already exists.
+        if self.norm_rect:
+            QTimer.singleShot(30, self._update_preview)
+
+    def _on_unmatched_clicked(self, side: str):
+        lst = self.unmatched_list_a if side == 'a' else self.unmatched_list_b
+        data = self.unmatched_a if side == 'a' else self.unmatched_b
+        idx = lst.currentRow()
+        if 0 <= idx < len(data):
+            self._set_active_ocr_page(data[idx], 'Set A' if side == 'a' else 'Set B')
+
+    def _apply_preview_to_active(self):
+        """Assign the just-read number to the page in the view, then re-match."""
+        if not self._active_ocr_page:
+            return
+        if not self._last_read:
+            QMessageBox.information(
+                self, "Nothing read",
+                "Draw a box that reads a sheet number first (see the preview).")
+            return
+        self._active_ocr_page.sheet_number = self._last_read
+        self._refresh_unmatched_lists()
+        self._rematch_unmatched()
+
+    def _rematch_unmatched(self):
+        """Re-pair any unmatched sheets that now share a sheet number."""
+        lookup_b = {}
+        for p in self.unmatched_b:
+            key = (p.sheet_number or "").strip()
+            if key and not key.startswith('(unread'):
+                lookup_b.setdefault(key, p)
+        matched_b_ids = set()
+        rest_a = []
+        for pa in self.unmatched_a:
+            key = (pa.sheet_number or "").strip()
+            pb = lookup_b.get(key)
+            if key and not key.startswith('(unread') and pb and id(pb) not in matched_b_ids:
+                matched_b_ids.add(id(pb))
+                self.matched_pairs.append(OverlayPair(page_a=pa, page_b=pb))
+            else:
+                rest_a.append(pa)
+        self.unmatched_a = rest_a
+        self.unmatched_b = [p for p in self.unmatched_b if id(p) not in matched_b_ids]
+        self._refresh_matched_list()
+        self._refresh_unmatched_lists()
+        self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
+
+    def _match_by_page_order(self):
+        """Pair sheets by position: 1st of A ↔ 1st of B, 2nd ↔ 2nd, … Any
+        leftovers (unequal counts) drop into the unmatched queue."""
+        self.matched_pairs = []
+        n = min(len(self.pages_a), len(self.pages_b))
+        for i in range(n):
+            pa, pb = self.pages_a[i], self.pages_b[i]
+            # Label by page order so the viewer's list reads sensibly.
+            pa.sheet_number = pa.sheet_number or f"Page {i + 1}"
+            pb.sheet_number = pb.sheet_number or f"Page {i + 1}"
+            self.matched_pairs.append(OverlayPair(page_a=pa, page_b=pb))
+        self.unmatched_a = list(self.pages_a[n:])
+        self.unmatched_b = list(self.pages_b[n:])
+        self._refresh_matched_list()
+        self._refresh_unmatched_lists()
+        self.unmatched_frame.setVisible(bool(self.unmatched_a or self.unmatched_b))
+        self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
 
     def _run_ocr(self):
         self.run_ocr_btn.setEnabled(False)
@@ -538,6 +637,7 @@ class MatchingScreen(QWidget):
         if dlg.exec():
             page.sheet_number = dlg.value()
             self._refresh_unmatched_lists()
+            self._rematch_unmatched()
 
     def _proceed(self):
         self.overlay_set.pairs = self.matched_pairs

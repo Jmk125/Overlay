@@ -6,8 +6,8 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 ## Features
 
 - **Batch or single overlay** — load individual PDFs or multi-page drawing sets
-- **OCR sheet matching** — zoom/pan the sample page and draw a box around the title block; app auto-matches by sheet number
-- **Unmatched queue** — manually pair any sheets that couldn't be auto-matched
+- **Three matching modes** — auto-match by **OCR** (zoom/pan the page, draw a box around the sheet number), match by **PDF page order**, or pair **manually**
+- **Unmatched queue** — click any unread/unmatched sheet to re-draw its OCR box (or edit its number); it re-matches automatically when numbers line up
 - **Color compositing** — shared lines render black on a white canvas (white on a dark canvas); Set A only = your color; Set B only = your color
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
 - **Real-time alignment** — Drawing B moves and rotates live under the cursor (GPU-accelerated layer transforms); the full color composite is recomputed only when you release
