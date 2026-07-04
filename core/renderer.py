@@ -265,6 +265,20 @@ def render_thumbnail(pdf_path: str, page_index: int, max_size: int = 200) -> QPi
     return pil_to_qpixmap(img)
 
 
+def render_thumbnail_doc(doc, page_index: int, max_size: int = 180) -> Image.Image:
+    """Render a thumbnail from an already-open document as a PIL image.
+
+    Reusing one open document across many pages avoids re-opening the PDF for
+    every page — a big speed-up when previewing large sets. Returns a PIL image
+    (safe to build off the GUI thread; convert to QPixmap on the main thread)."""
+    page = doc[page_index]
+    rect = page.rect
+    scale = max_size / max(rect.width, rect.height)
+    mat = fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+
 def _tesseract_exe_name() -> str:
     return 'tesseract.exe' if os.name == 'nt' else 'tesseract'
 

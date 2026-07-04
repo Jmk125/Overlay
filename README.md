@@ -5,7 +5,7 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 
 ## Features
 
-- **Batch or single overlay** — load individual PDFs or multi-page drawing sets
+- **Batch or single overlay** — load individual PDFs or multi-page drawing sets; for large sets the page picker opens instantly and lets you type a page range (e.g. `1-20, 45`) instead of waiting on thumbnails
 - **Three matching modes** — auto-match by **OCR** (zoom/pan the page, draw a box around the sheet number), match by **PDF page order**, or pair **manually**
 - **Unmatched queue** — click any unread/unmatched sheet to re-draw its OCR box (or edit its number); it re-matches automatically when numbers line up
 - **Color compositing** — shared lines render black on a white canvas (white on a dark canvas); Set A only = your color; Set B only = your color

@@ -30,7 +30,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    # These are imported lazily / inside try-except, so list them explicitly to
+    # guarantee they're bundled:
+    #   psutil     -> "From open PDF" (detect sheets open in Bluebeam/Acrobat)
+    #   pytesseract-> OCR sheet matching
+    #   openpyxl   -> Export Notes to .xlsx
+    hiddenimports=['psutil', 'pytesseract', 'openpyxl'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
