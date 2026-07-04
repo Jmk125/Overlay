@@ -61,7 +61,8 @@ class OverlaySet:
     pairs: list = field(default_factory=list)
     unmatched_a: list = field(default_factory=list)
     unmatched_b: list = field(default_factory=list)
-    render_dpi: int = 150
+    render_dpi: int = 120      # on-screen working resolution (lower = faster)
+    export_dpi: int = 200      # resolution used when exporting PNG/PDF
 
 
 # Common architectural/engineering scales

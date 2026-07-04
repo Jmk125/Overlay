@@ -91,6 +91,16 @@ class OpenPdfPickerDialog(QDialog):
         self.list.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self.list)
 
+        # Optional page range — fill it in to skip the page-picker window.
+        pr = QHBoxLayout()
+        pr.addWidget(QLabel("Pages (optional):"))
+        self.pages_edit = QLineEdit()
+        self.pages_edit.setPlaceholderText("e.g.  5   or   1-20, 45   — leave blank to pick pages in the next window")
+        self.pages_edit.setStyleSheet("background:#2a2a2a; color:#eee; border:1px solid #555; padding:4px;")
+        self.pages_edit.returnPressed.connect(self.accept)
+        pr.addWidget(self.pages_edit, 1)
+        layout.addLayout(pr)
+
         row = QHBoxLayout()
         row.addStretch()
         cancel = QPushButton("Cancel")
@@ -106,6 +116,9 @@ class OpenPdfPickerDialog(QDialog):
     def selected_path(self):
         item = self.list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def pages_text(self) -> str:
+        return self.pages_edit.text().strip()
 
 
 class LandingScreen(QWidget):
@@ -176,11 +189,14 @@ class LandingScreen(QWidget):
         self.color_btn_b = ColorButton(self.settings.get('default_color_b', '#0000FF'))
         color_row.addWidget(self.color_btn_b)
         color_row.addSpacing(24)
-        color_row.addWidget(QLabel("Render DPI:"))
+        screen_dpi_label = QLabel("Screen DPI:")
+        screen_dpi_label.setToolTip("On-screen working resolution — lower is faster")
+        color_row.addWidget(screen_dpi_label)
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(72, 300)
-        self.dpi_spin.setValue(self.settings.get('render_dpi', 150))
+        self.dpi_spin.setValue(self.settings.get('render_dpi', 120))
         self.dpi_spin.setFixedWidth(70)
+        self.dpi_spin.setToolTip("On-screen working resolution — lower is faster")
         color_row.addWidget(self.dpi_spin)
         color_row.addStretch()
         root.addLayout(color_row)
@@ -274,8 +290,32 @@ class LandingScreen(QWidget):
         dlg = OpenPdfPickerDialog(items, self)
         if dlg.exec():
             path = dlg.selected_path()
-            if path and os.path.exists(path):
+            if not (path and os.path.exists(path)):
+                return
+            pages_text = dlg.pages_text()
+            if pages_text:
+                # Skip the page picker — load exactly the requested pages.
+                self._load_pages_by_range(side, panel, path, pages_text)
+            else:
                 self._handle_dropped(side, panel, [path])
+
+    def _load_pages_by_range(self, side: str, panel: dict, path: str, pages_text: str):
+        from ui.page_selector import parse_page_ranges
+        try:
+            count = R.get_page_count(path)
+        except Exception:
+            count = 1
+        indices = parse_page_ranges(pages_text, count)
+        if not indices:
+            QMessageBox.information(
+                self, "Page range",
+                f"No valid pages in “{pages_text}”. This PDF has {count} page(s).")
+            return
+        pages = [DrawingPage(pdf_path=path, page_index=i, display_name=f"Page {i + 1}")
+                 for i in indices]
+        self._assign_pages(side, pages)
+        panel['page_list'].set_pages(pages)
+        panel['status'].setText(f"{len(pages)} page(s) from {os.path.basename(path)}")
 
     def _load_single(self, side: str, panel: dict):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -524,6 +564,7 @@ class LandingScreen(QWidget):
             color_a=self.color_btn_a.color(),
             color_b=self.color_btn_b.color(),
             render_dpi=self.dpi_spin.value(),
+            export_dpi=self.settings.get('export_dpi', 200),
             canvas_bg=bg,
             shared_color='#000000' if bg == 'white' else '#ffffff',
         )

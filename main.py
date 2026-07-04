@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
 
     def _show_matching(self, overlay_set: OverlaySet):
         self._clear_stack()
-        screen = MatchingScreen(overlay_set)
+        screen = MatchingScreen(overlay_set, self.settings)
         screen.matching_done.connect(self._show_viewer)
         self.stack.addWidget(screen)
         self.stack.setCurrentWidget(screen)
@@ -218,6 +218,8 @@ class MainWindow(QMainWindow):
             if isinstance(current, OverlayViewer):
                 current.apply_settings()
                 current.set_background_mode(self.settings.get('canvas_bg', 'white'))
+                current.apply_render_dpi(self.settings.get('render_dpi', 120),
+                                         self.settings.get('export_dpi', 200))
 
     def _open_project_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -281,6 +283,11 @@ Zoom, pan and antialiasing can be customized in Edit ▸ Preferences.
 
 
 def main():
+    # Must run before any multiprocessing (parallel OCR) is used, so that
+    # worker processes in a frozen .exe don't relaunch the whole GUI.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     app = QApplication(sys.argv)
     app.setApplicationName("Drawing Overlay Tool")
     app.setFont(QFont("Segoe UI", 10))
@@ -293,4 +300,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

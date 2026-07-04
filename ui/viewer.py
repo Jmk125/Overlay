@@ -981,6 +981,15 @@ class OverlayViewer(QWidget):
             antialiasing=s.get('antialiasing', True),
         )
 
+    def apply_render_dpi(self, screen_dpi: int, export_dpi: int):
+        """Apply DPI changes from Preferences to the open project. A changed
+        screen DPI invalidates the cache and re-renders the current pair."""
+        self.overlay_set.export_dpi = export_dpi
+        if self.overlay_set.render_dpi != screen_dpi:
+            self.overlay_set.render_dpi = screen_dpi
+            self._invalidate_cache()
+            self._do_render()
+
     def _load_pair(self, index: int):
         if index < 0 or index >= len(self.overlay_set.pairs):
             return
@@ -1378,8 +1387,8 @@ class OverlayViewer(QWidget):
             return
 
         try:
-            # Re-render at export quality
-            dpi = self.overlay_set.render_dpi
+            # Re-render at export quality (independent of the on-screen DPI)
+            dpi = getattr(self.overlay_set, 'export_dpi', None) or self.overlay_set.render_dpi
             img_a = R.render_page(pair.page_a.pdf_path, pair.page_a.page_index, dpi)
             img_b_raw = R.render_page(pair.page_b.pdf_path, pair.page_b.page_index, dpi)
             img_b = R.apply_transform(img_b_raw, pair.offset_x, pair.offset_y,

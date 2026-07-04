@@ -113,14 +113,27 @@ class SettingsDialog(QDialog):
 
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(72, 600)
-        self.dpi_spin.setValue(int(self._settings.get('render_dpi', 150)))
+        self.dpi_spin.setValue(int(self._settings.get('render_dpi', 120)))
         self.dpi_spin.setSuffix(" DPI")
-        rform.addRow("Default render DPI:", self.dpi_spin)
+        rform.addRow("Screen render DPI:", self.dpi_spin)
 
-        dpi_hint = QLabel("Higher DPI = sharper but slower. Applies to new overlays.")
+        dpi_hint = QLabel("On-screen working resolution — lower is faster. Exports "
+                          "use their own DPI below, so lowering this won't hurt "
+                          "export quality.")
         dpi_hint.setStyleSheet("color: #888; font-size: 9px;")
         dpi_hint.setWordWrap(True)
         rform.addRow("", dpi_hint)
+
+        self.export_dpi_spin = QSpinBox()
+        self.export_dpi_spin.setRange(72, 600)
+        self.export_dpi_spin.setValue(int(self._settings.get('export_dpi', 200)))
+        self.export_dpi_spin.setSuffix(" DPI")
+        rform.addRow("Export DPI:", self.export_dpi_spin)
+
+        edpi_hint = QLabel("Resolution used when exporting PNG/PDF — higher is sharper.")
+        edpi_hint.setStyleSheet("color: #888; font-size: 9px;")
+        edpi_hint.setWordWrap(True)
+        rform.addRow("", edpi_hint)
 
         root.addWidget(render)
 
@@ -185,6 +198,7 @@ class SettingsDialog(QDialog):
         self._settings['antialiasing'] = self.aa_check.isChecked()
         self._settings['canvas_bg'] = self.bg_combo.currentData()
         self._settings['render_dpi'] = self.dpi_spin.value()
+        self._settings['export_dpi'] = self.export_dpi_spin.value()
         self._settings['tesseract_path'] = self.tess_edit.text().strip()
         self._settings['default_color_a'] = self.color_a.color()
         self._settings['default_color_b'] = self.color_b.color()
