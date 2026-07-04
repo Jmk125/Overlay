@@ -6,7 +6,7 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 ## Features
 
 - **Batch or single overlay** — load individual PDFs or multi-page drawing sets; for large sets the page picker opens instantly and lets you type a page range (e.g. `1-20, 45`) instead of waiting on thumbnails
-- **Three matching modes** — auto-match by **OCR** (zoom/pan the page, draw a box around the sheet number), match by **PDF page order**, or pair **manually**
+- **Three matching modes** — auto-match by **OCR** (zoom/pan the page, draw a box around the sheet number; OCR runs across all CPU cores for large sets), match by **PDF page order**, or pair **manually**
 - **Unmatched queue** — click any unread/unmatched sheet to re-draw its OCR box (or edit its number); it re-matches automatically when numbers line up
 - **Color compositing** — shared lines render black on a white canvas (white on a dark canvas); Set A only = your color; Set B only = your color
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
@@ -157,7 +157,8 @@ drawing_overlay/
 Open **Edit ▸ Preferences** (`Ctrl+,`) to customize controls and rendering.
 Settings are saved to `~/.drawing_overlay/settings.json` and include:
 - Default colors for Set A and Set B
-- Render DPI
+- Screen render DPI (on-screen working resolution — lower is faster)
+- Export DPI (separate, so you can keep exports sharp while working at a low screen DPI)
 - Zoom behavior (scroll to zoom, or require Ctrl+scroll)
 - Pan mouse button (left / middle / right)
 - Edge antialiasing (smooths jagged lines when zooming low-DPI renders)

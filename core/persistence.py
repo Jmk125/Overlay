@@ -42,6 +42,7 @@ def save_project(overlay_set: OverlaySet, filepath: str):
         'shared_color': overlay_set.shared_color,
         'canvas_bg': overlay_set.canvas_bg,
         'render_dpi': overlay_set.render_dpi,
+        'export_dpi': overlay_set.export_dpi,
         'pairs': [pair_to_dict(p) for p in overlay_set.pairs],
         'unmatched_a': [page_to_dict(p) for p in overlay_set.unmatched_a],
         'unmatched_b': [page_to_dict(p) for p in overlay_set.unmatched_b],
@@ -70,7 +71,8 @@ def load_project(filepath: str) -> OverlaySet:
         color_b=data.get('color_b', '#0000FF'),
         shared_color=data.get('shared_color', '#000000'),
         canvas_bg=data.get('canvas_bg', 'white'),
-        render_dpi=data.get('render_dpi', 150),
+        render_dpi=data.get('render_dpi', 120),
+        export_dpi=data.get('export_dpi', 200),
     )
 
     for pd in data.get('pairs', []):
@@ -144,7 +146,8 @@ def load_settings(settings_path: str) -> dict:
     defaults = {
         'default_color_a': '#FF0000',
         'default_color_b': '#0000FF',
-        'render_dpi': 150,
+        'render_dpi': 120,          # on-screen working DPI (lower = faster)
+        'export_dpi': 200,          # DPI used when exporting PNG/PDF
         'export_path': os.path.expanduser('~/Desktop'),
         'last_open_dir': os.path.expanduser('~'),
         'ink_threshold': 30,

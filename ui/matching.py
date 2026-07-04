@@ -145,34 +145,89 @@ class OCRWorker(QThread):
     progress = pyqtSignal(int, int, str)   # current, total, label
     finished = pyqtSignal(list, list)       # pages_a_ocr'd, pages_b_ocr'd
 
-    def __init__(self, pages_a, pages_b, norm_rect: QRectF):
+    # Below this many pages, run OCR in-thread (a process pool isn't worth its
+    # startup cost); at or above it, spread the work across CPU cores.
+    PARALLEL_THRESHOLD = 8
+
+    def __init__(self, pages_a, pages_b, norm_rect: QRectF, tesseract_path: str = ''):
         super().__init__()
         self.pages_a = pages_a
         self.pages_b = pages_b
         self.norm_rect = norm_rect
+        self.tesseract_path = tesseract_path or ''
         self.cancelled = False
 
     def cancel(self):
         self.cancelled = True
+
+    @staticmethod
+    def _clean(text: str) -> str:
+        return (text or "").strip().replace('\n', ' ').replace('\r', '')
 
     def run(self):
         rect = (self.norm_rect.x(), self.norm_rect.y(),
                 self.norm_rect.x() + self.norm_rect.width(),
                 self.norm_rect.y() + self.norm_rect.height())
 
-        def ocr_pages(pages, offset, total):
+        tasks = []  # (tag, index_in_list, page)
+        for tag, pages in (('a', self.pages_a), ('b', self.pages_b)):
             for i, page in enumerate(pages):
-                if self.cancelled:
-                    return
-                text = R.ocr_region(page.pdf_path, page.page_index, rect)
-                # Clean up OCR text
-                text = text.strip().replace('\n', ' ').replace('\r', '')
-                page.sheet_number = text if text else f"(unread-{i})"
-                self.progress.emit(offset + i + 1, total, f"OCR: {page.display_name} → {page.sheet_number}")
+                tasks.append((tag, i, page))
+        total = len(tasks)
+        if total == 0:
+            self.finished.emit(self.pages_a, self.pages_b)
+            return
 
-        total = len(self.pages_a) + len(self.pages_b)
-        ocr_pages(self.pages_a, 0, total)
-        ocr_pages(self.pages_b, len(self.pages_a), total)
+        def assign(tag, i, page, text):
+            text = self._clean(text)
+            page.sheet_number = text if text else f"(unread-{i})"
+
+        done = 0
+        pool_ok = False
+        if total >= self.PARALLEL_THRESHOLD:
+            try:
+                from concurrent.futures import ProcessPoolExecutor, as_completed
+                workers = max(1, min(total, (os.cpu_count() or 2)))
+                with ProcessPoolExecutor(
+                        max_workers=workers,
+                        initializer=R.configure_tesseract,
+                        initargs=(self.tesseract_path,)) as ex:
+                    fut_map = {
+                        ex.submit(R.ocr_region, p.pdf_path, p.page_index, rect): (tag, i, p)
+                        for (tag, i, p) in tasks
+                    }
+                    for fut in as_completed(fut_map):
+                        if self.cancelled:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            break
+                        tag, i, page = fut_map[fut]
+                        try:
+                            text = fut.result()
+                        except Exception:
+                            text = ""
+                        assign(tag, i, page, text)
+                        done += 1
+                        self.progress.emit(done, total,
+                                           f"OCR {done}/{total}: {page.sheet_number}")
+                pool_ok = True
+            except Exception as e:
+                print(f"Parallel OCR unavailable ({e}); using single core.")
+                pool_ok = False
+
+        if not pool_ok:
+            done = 0
+            for tag, i, page in tasks:
+                if self.cancelled:
+                    break
+                try:
+                    text = R.ocr_region(page.pdf_path, page.page_index, rect)
+                except Exception:
+                    text = ""
+                assign(tag, i, page, text)
+                done += 1
+                self.progress.emit(done, total,
+                                   f"OCR {done}/{total}: {page.sheet_number}")
+
         if not self.cancelled:
             self.finished.emit(self.pages_a, self.pages_b)
 
@@ -207,9 +262,10 @@ class ManualMatchDialog(QDialog):
 class MatchingScreen(QWidget):
     matching_done = pyqtSignal(object)  # emits OverlaySet with pairs filled in
 
-    def __init__(self, overlay_set: OverlaySet, parent=None):
+    def __init__(self, overlay_set: OverlaySet, settings: dict = None, parent=None):
         super().__init__(parent)
         self.overlay_set = overlay_set
+        self.settings = settings or {}
         self.pages_a: list[DrawingPage] = overlay_set._pages_a
         self.pages_b: list[DrawingPage] = overlay_set._pages_b
         self.norm_rect = None
@@ -544,7 +600,8 @@ class MatchingScreen(QWidget):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(0)
 
-        self.ocr_worker = OCRWorker(self.pages_a, self.pages_b, self.norm_rect)
+        self.ocr_worker = OCRWorker(self.pages_a, self.pages_b, self.norm_rect,
+                                    self.settings.get('tesseract_path', ''))
         self.ocr_worker.progress.connect(self._on_ocr_progress)
         self.ocr_worker.finished.connect(self._on_ocr_done)
         self.ocr_worker.start()
