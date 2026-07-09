@@ -173,6 +173,29 @@ class SettingsDialog(QDialog):
         self.tess_edit.textChanged.connect(self._refresh_tess_status)
         root.addWidget(ocr)
 
+        # ── Updates ──────────────────────────────────────────────
+        updates = QGroupBox("Updates")
+        updates.setStyleSheet(self._group_style())
+        updates_layout = QVBoxLayout(updates)
+
+        update_row = QHBoxLayout()
+        update_row.addWidget(QLabel("Version host:"))
+        self.update_url_edit = QLineEdit(self._settings.get('update_server_url', 'http://10.0.10.180:3090/'))
+        self.update_url_edit.setPlaceholderText("http://10.0.10.180:3090/")
+        update_row.addWidget(self.update_url_edit, 1)
+        updates_layout.addLayout(update_row)
+
+        self.update_check = QCheckBox("Check for updates when the tool starts")
+        self.update_check.setChecked(bool(self._settings.get('check_for_updates', True)))
+        updates_layout.addWidget(self.update_check)
+
+        update_hint = QLabel("The app looks for JSON update metadata at the host URL and common version endpoints.")
+        update_hint.setStyleSheet("color: #888; font-size: 9px;")
+        update_hint.setWordWrap(True)
+        updates_layout.addWidget(update_hint)
+
+        root.addWidget(updates)
+
         # ── Buttons ───────────────────────────────────────────────
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -200,6 +223,8 @@ class SettingsDialog(QDialog):
         self._settings['render_dpi'] = self.dpi_spin.value()
         self._settings['export_dpi'] = self.export_dpi_spin.value()
         self._settings['tesseract_path'] = self.tess_edit.text().strip()
+        self._settings['update_server_url'] = self.update_url_edit.text().strip() or 'http://10.0.10.180:3090/'
+        self._settings['check_for_updates'] = self.update_check.isChecked()
         self._settings['default_color_a'] = self.color_a.color()
         self._settings['default_color_b'] = self.color_b.color()
         return self._settings

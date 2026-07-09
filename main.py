@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QStackedWidget, QFileDialog,
     QMessageBox, QApplication, QMenuBar, QMenu
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QColor, QPalette, QIcon
 
 from core.models import OverlaySet
@@ -20,8 +20,32 @@ from ui.landing import LandingScreen
 from ui.matching import MatchingScreen
 from ui.viewer import OverlayViewer
 from ui.settings_dialog import SettingsDialog
+from core.version_check import (
+    APP_VERSION, DEFAULT_UPDATE_SERVER, fetch_latest_update, is_newer_version
+)
 
 SETTINGS_PATH = os.path.expanduser("~/.drawing_overlay/settings.json")
+
+
+class UpdateCheckWorker(QThread):
+    update_found = pyqtSignal(object)
+    check_failed = pyqtSignal(str)
+    no_update = pyqtSignal()
+
+    def __init__(self, server_url: str, current_version: str, parent=None):
+        super().__init__(parent)
+        self.server_url = server_url
+        self.current_version = current_version
+
+    def run(self):
+        try:
+            info = fetch_latest_update(self.server_url)
+            if info and is_newer_version(info.version, self.current_version):
+                self.update_found.emit(info)
+            else:
+                self.no_update.emit()
+        except Exception as exc:
+            self.check_failed.emit(str(exc))
 
 
 def resource_path(name: str):
@@ -58,6 +82,8 @@ class MainWindow(QMainWindow):
 
         self._show_landing()
         self._build_menu()
+        self._update_worker = None
+        QTimer.singleShot(1000, self._check_for_updates_on_startup)
 
     def _apply_dark_theme(self):
         self.setStyleSheet("""
@@ -138,9 +164,60 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(prefs_act)
 
         help_menu = menubar.addMenu("Help")
+        updates_act = QAction("Check for Updates...", self)
+        updates_act.triggered.connect(lambda: self._start_update_check(manual=True))
+        help_menu.addAction(updates_act)
+
         shortcuts_act = QAction("Keyboard Shortcuts", self)
         shortcuts_act.triggered.connect(self._show_shortcuts)
         help_menu.addAction(shortcuts_act)
+
+    def _check_for_updates_on_startup(self):
+        if self.settings.get('check_for_updates', True):
+            self._start_update_check(manual=False)
+
+    def _start_update_check(self, manual: bool = False):
+        if self._update_worker and self._update_worker.isRunning():
+            if manual:
+                QMessageBox.information(self, "Updates", "An update check is already running.")
+            return
+        server_url = self.settings.get('update_server_url') or DEFAULT_UPDATE_SERVER
+        worker = UpdateCheckWorker(server_url, APP_VERSION, self)
+        worker.update_found.connect(lambda info: self._show_update_available(info))
+        worker.no_update.connect(lambda: self._show_no_update_found() if manual else None)
+        worker.check_failed.connect(lambda err: self._show_update_check_failed(err) if manual else None)
+        worker.finished.connect(lambda: setattr(self, '_update_worker', None))
+        self._update_worker = worker
+        worker.start()
+
+    def _show_update_available(self, info):
+        lines = [
+            f"A newer Drawing Overlay Tool version is available.",
+            "",
+            f"Current version: {APP_VERSION}",
+            f"Latest version:  {info.version}",
+        ]
+        if info.changelog:
+            lines.extend(["", "Changelog:", str(info.changelog)])
+        if info.download_url:
+            lines.extend(["", f"Download: {info.download_url}"])
+        if info.source_url:
+            lines.extend(["", f"Checked: {info.source_url}"])
+        QMessageBox.information(self, "Update Available", "\n".join(lines))
+
+    def _show_no_update_found(self):
+        QMessageBox.information(
+            self, "Updates",
+            f"Drawing Overlay Tool is up to date.\n\nCurrent version: {APP_VERSION}"
+        )
+
+    def _show_update_check_failed(self, error: str):
+        QMessageBox.warning(
+            self, "Update Check Failed",
+            "Could not check for updates.\n\n"
+            f"Server: {self.settings.get('update_server_url') or DEFAULT_UPDATE_SERVER}\n"
+            f"Error: {error}"
+        )
 
     def _show_landing(self):
         self._clear_stack()
