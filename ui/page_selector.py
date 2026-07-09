@@ -1,13 +1,14 @@
 """
 Page selector dialog - pick which pages of a PDF to include.
 
-For large PDFs (hundreds of sheets) rendering every thumbnail is slow, so:
-  - thumbnails are NOT auto-rendered above AUTO_THUMB_LIMIT pages (the dialog
-    opens instantly); the user types a page range instead, or clicks
-    "Load previews" to render them on demand,
-  - when previews are rendered, the PDF is opened once and reused.
+For large PDFs (hundreds of sheets), callers can bypass this dialog by typing
+a page range before opening it. If the user reaches this picker, they need
+visual previews, so thumbnails start loading immediately. Large documents use
+multiple worker processes so preview rendering can use available CPU cores.
 """
 import fitz
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QWidget, QGridLayout, QCheckBox, QFrame, QLineEdit,
@@ -45,8 +46,26 @@ def parse_page_ranges(text: str, max_pages: int) -> list:
     return sorted(result)
 
 
+def _render_thumbnail_page(args):
+    """Render one thumbnail in a worker process.
+
+    Each process opens the PDF for its own page because PyMuPDF document/page
+    objects are not safe to share across processes. Returning a PIL image keeps
+    all QPixmap creation on the GUI thread.
+    """
+    pdf_path, page_index, max_size = args
+    doc = fitz.open(pdf_path)
+    try:
+        return page_index, R.render_thumbnail_doc(doc, page_index, max_size=max_size)
+    finally:
+        doc.close()
+
+
 class ThumbnailLoader(QThread):
     thumbnail_ready = pyqtSignal(int, object)  # page_index, PIL image
+    progress = pyqtSignal(int, int)            # rendered, total
+
+    PARALLEL_THRESHOLD = 8
 
     def __init__(self, pdf_path: str, page_count: int):
         super().__init__()
@@ -57,23 +76,57 @@ class ThumbnailLoader(QThread):
     def cancel(self):
         self.cancelled = True
 
-    def run(self):
+    def _emit_thumbnail(self, index: int, img, done: int):
+        if not self.cancelled:
+            self.thumbnail_ready.emit(index, img)
+            self.progress.emit(done, self.page_count)
+
+    def _run_single_process(self):
+        doc = fitz.open(self.pdf_path)   # open once, render many
         try:
-            doc = fitz.open(self.pdf_path)   # open once, render many
-        except Exception:
-            return
-        try:
-            for i in range(self.page_count):
+            for done, i in enumerate(range(self.page_count), start=1):
                 if self.cancelled:
                     return
                 try:
                     img = R.render_thumbnail_doc(doc, i, max_size=180)
-                    if not self.cancelled:
-                        self.thumbnail_ready.emit(i, img)
+                    self._emit_thumbnail(i, img, done)
                 except Exception:
-                    pass
+                    self.progress.emit(done, self.page_count)
         finally:
             doc.close()
+
+    def _run_process_pool(self):
+        workers = max(1, min(self.page_count, (os.cpu_count() or 2)))
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futs = [
+                ex.submit(_render_thumbnail_page, (self.pdf_path, i, 180))
+                for i in range(self.page_count)
+            ]
+            for done, fut in enumerate(as_completed(futs), start=1):
+                if self.cancelled:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    return
+                try:
+                    index, img = fut.result()
+                    self._emit_thumbnail(index, img, done)
+                except Exception:
+                    self.progress.emit(done, self.page_count)
+
+    def run(self):
+        if self.page_count <= 0:
+            return
+        try:
+            if self.page_count >= self.PARALLEL_THRESHOLD:
+                self._run_process_pool()
+            else:
+                self._run_single_process()
+        except Exception as e:
+            print(f"Parallel thumbnail rendering unavailable ({e}); using single process.")
+            if not self.cancelled:
+                try:
+                    self._run_single_process()
+                except Exception:
+                    return
 
 
 class PageThumbWidget(QWidget):
@@ -109,7 +162,7 @@ class PageThumbWidget(QWidget):
 
 
 class PageSelectorDialog(QDialog):
-    AUTO_THUMB_LIMIT = 40   # above this many pages, don't auto-render previews
+    AUTO_THUMB_LIMIT = 40   # above this many pages, explain that previews load in parallel
 
     def __init__(self, pdf_path: str, page_count: int, parent=None):
         super().__init__(parent)
@@ -122,8 +175,7 @@ class PageSelectorDialog(QDialog):
         self.setMinimumSize(820, 620)
         self.setStyleSheet("background: #121212; color: #eee;")
         self._build_ui()
-        if not self._large:
-            self._start_thumbnails()
+        self._start_thumbnails()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -153,10 +205,9 @@ class PageSelectorDialog(QDialog):
         toolbar.addWidget(select_all)
         toolbar.addWidget(select_none)
 
-        self.load_prev_btn = QPushButton("Load previews")
+        self.load_prev_btn = QPushButton("Loading previews…")
         self.load_prev_btn.setStyleSheet("background: #3a3a3a; color: white; border: none; padding: 5px 12px; border-radius: 4px;")
         self.load_prev_btn.clicked.connect(self._start_thumbnails)
-        self.load_prev_btn.setVisible(self._large)
         toolbar.addWidget(self.load_prev_btn)
 
         toolbar.addStretch()
@@ -166,8 +217,8 @@ class PageSelectorDialog(QDialog):
         layout.addLayout(toolbar)
 
         if self._large:
-            hint = QLabel("⚡ Large document — previews are off for speed. Type a "
-                          "page range above (fastest), or click “Load previews”.")
+            hint = QLabel("⚡ Large document — previews are loading in parallel. "
+                          "For the fastest path next time, type a page range before opening this picker.")
             hint.setStyleSheet("color:#FFD700; font-size:10px;")
             hint.setWordWrap(True)
             layout.addWidget(hint)
@@ -233,6 +284,7 @@ class PageSelectorDialog(QDialog):
         self.load_prev_btn.setText("Loading previews…")
         self.loader = ThumbnailLoader(self.pdf_path, self.page_count)
         self.loader.thumbnail_ready.connect(self._on_thumbnail)
+        self.loader.progress.connect(self._on_thumbnail_progress)
         self.loader.finished.connect(lambda: self.load_prev_btn.setText("Previews loaded"))
         self.loader.start()
 
@@ -241,6 +293,9 @@ class PageSelectorDialog(QDialog):
             self.loader.cancel()
             self.loader.wait(500)
         super().closeEvent(event)
+
+    def _on_thumbnail_progress(self, done: int, total: int):
+        self.load_prev_btn.setText(f"Loading previews… {done}/{total}")
 
     def _on_thumbnail(self, index: int, pil_img):
         if index < len(self.thumb_widgets):
