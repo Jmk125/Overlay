@@ -157,6 +157,8 @@ def load_settings(settings_path: str) -> dict:
         'antialiasing': True,      # smooth scaled drawings to soften low-DPI edges
         'canvas_bg': 'white',      # default canvas background: 'white' | 'dark'
         'tesseract_path': '',      # optional path to tesseract.exe or its folder
+        'update_server_url': 'http://10.0.10.180:3090/',
+        'check_for_updates': True,
     }
     if os.path.exists(settings_path):
         try:
