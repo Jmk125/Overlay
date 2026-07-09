@@ -12,9 +12,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QWidget, QGridLayout, QCheckBox, QFrame, QLineEdit,
-    QMessageBox
+    QMessageBox, QRubberBand, QApplication
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent, QPoint, QRect
 from PyQt6.QtGui import QFont
 from core import renderer as R
 
@@ -134,8 +134,8 @@ class PageThumbWidget(QWidget):
         super().__init__(parent)
         self.page_index = page_index
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         self.img_label = QLabel()
         self.img_label.setFixedSize(180, 180)
@@ -146,11 +146,25 @@ class PageThumbWidget(QWidget):
 
         self.checkbox = QCheckBox(f"Page {page_index + 1}")
         self.checkbox.setChecked(checked)
-        self.checkbox.setStyleSheet("color: #ddd;")
+        self.checkbox.setStyleSheet("""
+            QCheckBox { color: #eee; font-weight: 600; padding: 2px; }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #aaa;
+                border-radius: 3px;
+                background: #101010;
+            }
+            QCheckBox::indicator:hover { border-color: #fff; }
+            QCheckBox::indicator:checked {
+                background: #27a350;
+                border-color: #6ee08a;
+            }
+        """)
         layout.addWidget(self.checkbox)
 
         self.setFixedWidth(200)
-        self.setStyleSheet("background: #1a1a1a; border: 1px solid #333; border-radius: 4px;")
+        self.setStyleSheet("background: #1a1a1a; border: 1px solid #444; border-radius: 4px;")
 
     def set_pixmap(self, pix):
         scaled = pix.scaled(180, 180, Qt.AspectRatioMode.KeepAspectRatio,
@@ -171,6 +185,10 @@ class PageSelectorDialog(QDialog):
         self.thumb_widgets: list[PageThumbWidget] = []
         self._thumbs_started = False
         self._large = page_count > self.AUTO_THUMB_LIMIT
+        self._drag_container = None
+        self._drag_origin = QPoint()
+        self._drag_selecting = False
+        self._rubber_band = None
         self.setWindowTitle(f"Select Pages — {page_count} pages")
         self.setMinimumSize(820, 620)
         self.setStyleSheet("background: #121212; color: #eee;")
@@ -223,6 +241,11 @@ class PageSelectorDialog(QDialog):
             hint.setWordWrap(True)
             layout.addWidget(hint)
 
+        drag_hint = QLabel("Tip: drag a box across thumbnails to select multiple pages. Hold Ctrl while dragging to deselect.")
+        drag_hint.setStyleSheet("color:#9aa7ff; font-size:10px;")
+        drag_hint.setWordWrap(True)
+        layout.addWidget(drag_hint)
+
         # ── Grid of pages ──
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -239,6 +262,7 @@ class PageSelectorDialog(QDialog):
             self.thumb_widgets.append(thumb)
             self.grid.addWidget(thumb, i // cols, i % cols)
 
+        self._install_drag_selection(container)
         scroll.setWidget(container)
         layout.addWidget(scroll)
 
@@ -262,6 +286,62 @@ class PageSelectorDialog(QDialog):
 
     def _update_count(self):
         self.count_label.setText(self._count_text())
+
+    def _install_drag_selection(self, container: QWidget):
+        self._drag_container = container
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, container)
+        container.installEventFilter(self)
+        for thumb in self.thumb_widgets:
+            thumb.installEventFilter(self)
+            thumb.img_label.installEventFilter(self)
+            thumb.checkbox.installEventFilter(self)
+
+    def _event_pos_in_drag_container(self, obj, event) -> QPoint:
+        pos = event.position().toPoint()
+        if obj is self._drag_container:
+            return pos
+        return obj.mapTo(self._drag_container, pos)
+
+    def eventFilter(self, obj, event):
+        if self._drag_container is None or self._rubber_band is None:
+            return super().eventFilter(obj, event)
+
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_origin = self._event_pos_in_drag_container(obj, event)
+            self._drag_selecting = False
+            self._rubber_band.hide()
+            return False
+
+        if event.type() == QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+            current = self._event_pos_in_drag_container(obj, event)
+            if not self._drag_selecting:
+                if (current - self._drag_origin).manhattanLength() < QApplication.startDragDistance():
+                    return False
+                self._drag_selecting = True
+                self._rubber_band.show()
+            self._rubber_band.setGeometry(QRect(self._drag_origin, current).normalized())
+            return True
+
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if not self._drag_selecting:
+                return False
+            current = self._event_pos_in_drag_container(obj, event)
+            rect = QRect(self._drag_origin, current).normalized()
+            self._rubber_band.hide()
+            self._drag_selecting = False
+            self._apply_drag_selection(rect, event.modifiers())
+            return True
+
+        return super().eventFilter(obj, event)
+
+    def _apply_drag_selection(self, rect: QRect, modifiers):
+        if rect.width() < 4 or rect.height() < 4:
+            return
+        should_select = not (modifiers & Qt.KeyboardModifier.ControlModifier)
+        for thumb in self.thumb_widgets:
+            if rect.intersects(thumb.geometry()):
+                thumb.checkbox.setChecked(should_select)
+        self._update_count()
 
     def _apply_range(self):
         text = self.range_edit.text().strip()
