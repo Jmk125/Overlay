@@ -2,6 +2,7 @@
 Core data models for Drawing Overlay Tool
 """
 from dataclasses import dataclass, field
+import uuid
 from typing import Optional
 from PyQt6.QtGui import QColor
 
@@ -50,6 +51,27 @@ class OverlayPair:
 
 
 @dataclass
+class WorkspaceDrawing:
+    """One independently adjustable drawing on an empty workspace canvas."""
+    page: DrawingPage
+    name: str = ""
+    drawing_id: str = ""
+    color: str = "#000000"
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    rotation: float = 0.0
+    scale_factor: float = 1.0
+    erase_rects: list = field(default_factory=list)
+    erase_bg: str = "white"
+
+    def __post_init__(self):
+        if not self.drawing_id:
+            self.drawing_id = uuid.uuid4().hex
+        if not self.name:
+            self.name = self.page.display_name
+
+
+@dataclass
 class OverlaySet:
     """The full overlay project state"""
     set_a_label: str = "Set A"
@@ -63,6 +85,8 @@ class OverlaySet:
     unmatched_b: list = field(default_factory=list)
     render_dpi: int = 120      # on-screen working resolution (lower = faster)
     export_dpi: int = 200      # resolution used when exporting PNG/PDF
+    workspace_mode: bool = False
+    workspace_drawings: list = field(default_factory=list)
 
 
 # Common architectural/engineering scales
