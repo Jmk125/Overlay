@@ -2,7 +2,7 @@
 import os
 import uuid
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QCursor
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QCursor, QImage
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QColorDialog, QDoubleSpinBox, QGraphicsView,
@@ -17,16 +17,43 @@ from ui.landing import OpenPdfPickerDialog
 
 
 class WorkspacePixmapItem(QGraphicsPixmapItem):
-    """Selectable workspace drawing with per-drawing rectangular erase masks."""
+    """Selectable workspace drawing with per-drawing transparent erase masks."""
     def __init__(self, drawing: WorkspaceDrawing, pixmap: QPixmap):
-        super().__init__(pixmap)
+        super().__init__()
         self.drawing = drawing
+        self._base_pixmap = pixmap
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
             QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
         )
         self.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
+        self.rebuild_pixmap()
         self.sync_from_model()
+
+    def set_base_pixmap(self, pixmap: QPixmap):
+        """Replace the unerased source pixmap, then reapply saved erase masks."""
+        self._base_pixmap = pixmap
+        self.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
+        self.rebuild_pixmap()
+
+    def rebuild_pixmap(self):
+        """Bake erase masks into this drawing pixmap by clearing alpha.
+
+        The stored base pixmap remains intact, so undoing an erase or changing
+        color can rebuild the visible image from the original drawing pixels.
+        """
+        image = self._base_pixmap.toImage().convertToFormat(
+            QImage.Format.Format_ARGB32_Premultiplied)
+        mask_painter = QPainter(image)
+        mask_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        mask_painter.setPen(Qt.PenStyle.NoPen)
+        mask_painter.setBrush(Qt.BrushStyle.SolidPattern)
+        for r in self.drawing.erase_rects:
+            mask_painter.drawRect(QRectF(
+                r[0] * image.width(), r[1] * image.height(),
+                r[2] * image.width(), r[3] * image.height()))
+        mask_painter.end()
+        self.setPixmap(QPixmap.fromImage(image))
 
     def sync_from_model(self):
         self.setPos(self.drawing.offset_x, self.drawing.offset_y)
@@ -34,22 +61,7 @@ class WorkspacePixmapItem(QGraphicsPixmapItem):
         self.setScale(self.drawing.scale_factor)
 
     def paint(self, painter: QPainter, option, widget=None):
-        # Build this drawing on an isolated transparent layer so erase masks
-        # delete only this item's pixels. Painting CompositionMode_Clear
-        # directly on the scene would also punch through drawings underneath.
-        layer = QPixmap(self.pixmap().size())
-        layer.fill(Qt.GlobalColor.transparent)
-        layer_painter = QPainter(layer)
-        layer_painter.drawPixmap(0, 0, self.pixmap())
-        layer_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        layer_painter.setPen(Qt.PenStyle.NoPen)
-        layer_painter.setBrush(Qt.BrushStyle.SolidPattern)
-        for r in self.drawing.erase_rects:
-            layer_painter.drawRect(QRectF(
-                r[0] * self.pixmap().width(), r[1] * self.pixmap().height(),
-                r[2] * self.pixmap().width(), r[3] * self.pixmap().height()))
-        layer_painter.end()
-        painter.drawPixmap(0, 0, layer)
+        painter.drawPixmap(0, 0, self.pixmap())
         if self.isSelected():
             pen = QPen(QColor('#00e0ff'))
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -255,7 +267,7 @@ class WorkspaceCanvas(QGraphicsView):
                 if x1 - x0 > 4 and y1 - y0 > 4:
                     w, h = item.pixmap().width(), item.pixmap().height()
                     item.drawing.erase_rects.append([x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h])
-                    item.update()
+                    item.rebuild_pixmap()
                     self.drawing_changed.emit()
             self._erase_start = None
             self._clear_erase_preview()
@@ -561,8 +573,7 @@ class EmptyWorkspace(QWidget):
             d.color = c.name()
             img = R.render_page(d.page.pdf_path, d.page.page_index, self.overlay_set.render_dpi)
             item = self.canvas.selected_item()
-            item.setPixmap(R.pil_to_qpixmap(R.render_single_colored(img, d.color)))
-            item.update()
+            item.set_base_pixmap(R.pil_to_qpixmap(R.render_single_colored(img, d.color)))
 
     def _set_rotation(self, value):
         item = self.canvas.selected_item()
@@ -587,7 +598,7 @@ class EmptyWorkspace(QWidget):
         item = self.canvas.selected_item()
         if item and item.drawing.erase_rects:
             item.drawing.erase_rects.pop()
-            item.update()
+            item.rebuild_pixmap()
 
     @staticmethod
     def _collapse_btn_style():
