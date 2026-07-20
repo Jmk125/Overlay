@@ -125,6 +125,7 @@ class LandingScreen(QWidget):
     start_matching = pyqtSignal(object)   # emits OverlaySet
     start_viewer = pyqtSignal(object)     # emits OverlaySet (single-drawing fast path)
     open_project = pyqtSignal(str)        # emits filepath
+    create_empty_workspace = pyqtSignal()
 
     def __init__(self, settings: dict, parent=None):
         super().__init__(parent)
@@ -145,7 +146,7 @@ class LandingScreen(QWidget):
         title.setStyleSheet("color: #ffffff;")
         root.addWidget(title)
 
-        subtitle = QLabel("Compare two drawing sets with intelligent overlay, alignment, and version toggling.")
+        subtitle = QLabel("Compare two drawing sets, or stitch many drawings together on a blank workspace.")
         subtitle.setStyleSheet("color: #aaaaaa; font-size: 12px;")
         root.addWidget(subtitle)
 
@@ -156,6 +157,11 @@ class LandingScreen(QWidget):
         open_btn.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
         open_btn.clicked.connect(self._open_project)
         open_row.addWidget(open_btn)
+        empty_btn = QPushButton("🧩  Create Empty Work Space")
+        empty_btn.setFixedHeight(36)
+        empty_btn.setStyleSheet(self._btn_style("#4f3b6b", "#6b5191"))
+        empty_btn.clicked.connect(self.create_empty_workspace)
+        open_row.addWidget(empty_btn)
         open_row.addStretch()
         root.addLayout(open_row)
 
