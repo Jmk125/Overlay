@@ -19,6 +19,7 @@ from core import renderer as R
 from ui.landing import LandingScreen
 from ui.matching import MatchingScreen
 from ui.viewer import OverlayViewer
+from ui.workspace import EmptyWorkspace
 from ui.settings_dialog import SettingsDialog
 from core.version_check import (
     APP_VERSION, DEFAULT_UPDATE_SERVER, fetch_latest_update, is_newer_version
@@ -225,6 +226,7 @@ class MainWindow(QMainWindow):
         screen.start_matching.connect(self._show_matching)
         screen.start_viewer.connect(self._show_viewer)
         screen.open_project.connect(self._load_project)
+        screen.create_empty_workspace.connect(self._show_empty_workspace)
         self.stack.addWidget(screen)
         self.stack.setCurrentWidget(screen)
 
@@ -234,6 +236,27 @@ class MainWindow(QMainWindow):
         screen.matching_done.connect(self._show_viewer)
         self.stack.addWidget(screen)
         self.stack.setCurrentWidget(screen)
+
+    def _show_empty_workspace(self):
+        bg = self.settings.get('canvas_bg', 'white')
+        overlay_set = OverlaySet(
+            set_a_label='Empty Work Space',
+            set_b_label='Workspace Drawings',
+            render_dpi=self.settings.get('render_dpi', 120),
+            export_dpi=self.settings.get('export_dpi', 200),
+            canvas_bg=bg,
+            shared_color='#000000' if bg == 'white' else '#ffffff',
+            workspace_mode=True,
+        )
+        self._show_workspace(overlay_set)
+
+    def _show_workspace(self, overlay_set: OverlaySet):
+        self._clear_stack()
+        screen = EmptyWorkspace(overlay_set, self.settings)
+        screen.save_project.connect(self._save_project_dialog_with_set)
+        self.stack.addWidget(screen)
+        self.stack.setCurrentWidget(screen)
+        self._current_overlay_set = overlay_set
 
     def _show_viewer(self, overlay_set: OverlaySet):
         self._clear_stack()
@@ -310,7 +333,10 @@ class MainWindow(QMainWindow):
     def _load_project(self, path: str):
         try:
             overlay_set = load_project(path)
-            self._show_viewer(overlay_set)
+            if getattr(overlay_set, 'workspace_mode', False):
+                self._show_workspace(overlay_set)
+            else:
+                self._show_viewer(overlay_set)
             self.settings['last_open_dir'] = os.path.dirname(path)
             save_settings(self.settings, SETTINGS_PATH)
         except Exception as e:
