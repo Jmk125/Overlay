@@ -101,12 +101,14 @@ def composite_overlay(img_a: Image.Image, img_b: Image.Image,
                       shared_color: str = "#000000") -> Image.Image:
     """
     Composite two drawings:
-    - Pixels present in both -> black
+    - Pixels present in both -> shared_color
     - Pixels only in A -> color_a
     - Pixels only in B -> color_b
     - Background -> transparent
 
     'Present' means darker than threshold (i.e., it's ink, not paper).
+    Grey source pixels are preserved as lighter alpha so shaded regions do not
+    get flattened into the same visual weight as black linework.
     """
     # Ensure same size
     size = (max(img_a.width, img_b.width), max(img_a.height, img_b.height))
@@ -119,13 +121,18 @@ def composite_overlay(img_a: Image.Image, img_b: Image.Image,
     arr_a = np.array(canvas_a.convert("RGB")).astype(np.int16)
     arr_b = np.array(canvas_b.convert("RGB")).astype(np.int16)
 
-    # "Ink" mask: pixel is dark (ink present) if luminance < 255 - threshold
-    def ink_mask(arr):
-        luminance = 0.299 * arr[:,:,0] + 0.587 * arr[:,:,1] + 0.114 * arr[:,:,2]
-        return luminance < (255 - threshold)
+    # "Ink" mask: pixel is dark (ink present) if luminance < 255 - threshold.
+    # Keep the darkness value as alpha so grey poche/hatches stay visibly
+    # lighter than black linework instead of being flattened to solid ink.
+    def luminance(arr):
+        return 0.299 * arr[:,:,0] + 0.587 * arr[:,:,1] + 0.114 * arr[:,:,2]
 
-    mask_a = ink_mask(arr_a)
-    mask_b = ink_mask(arr_b)
+    lum_a = luminance(arr_a)
+    lum_b = luminance(arr_b)
+    mask_a = lum_a < (255 - threshold)
+    mask_b = lum_b < (255 - threshold)
+    alpha_a = np.clip(255 - lum_a, 0, 255).astype(np.uint8)
+    alpha_b = np.clip(255 - lum_b, 0, 255).astype(np.uint8)
 
     # Parse colors
     def hex_to_rgb(hex_color):
@@ -141,22 +148,35 @@ def composite_overlay(img_a: Image.Image, img_b: Image.Image,
 
     # Both present -> shared color (black on white bg, white on dark bg)
     both = mask_a & mask_b
-    result[both] = [rgb_shared[0], rgb_shared[1], rgb_shared[2], 255]
+    result[both, 0] = rgb_shared[0]
+    result[both, 1] = rgb_shared[1]
+    result[both, 2] = rgb_shared[2]
+    result[both, 3] = np.maximum(alpha_a[both], alpha_b[both])
 
     # Only in A -> color_a
     only_a = mask_a & ~mask_b
-    result[only_a] = [rgb_a[0], rgb_a[1], rgb_a[2], 255]
+    result[only_a, 0] = rgb_a[0]
+    result[only_a, 1] = rgb_a[1]
+    result[only_a, 2] = rgb_a[2]
+    result[only_a, 3] = alpha_a[only_a]
 
     # Only in B -> color_b
     only_b = mask_b & ~mask_a
-    result[only_b] = [rgb_b[0], rgb_b[1], rgb_b[2], 255]
+    result[only_b, 0] = rgb_b[0]
+    result[only_b, 1] = rgb_b[1]
+    result[only_b, 2] = rgb_b[2]
+    result[only_b, 3] = alpha_b[only_b]
 
     # Background stays transparent (alpha=0 already)
     return Image.fromarray(result, "RGBA")
 
 
 def render_single_colored(img: Image.Image, color: str, threshold: int = 30) -> Image.Image:
-    """Render a single drawing page with ink in the specified color (for solo view)"""
+    """Render a single drawing page with ink in the specified color.
+
+    Source darkness becomes output alpha, preserving grey fills/hatches as
+    lighter drawing content instead of forcing every ink pixel to solid color.
+    """
     arr = np.array(img.convert("RGB")).astype(np.int16)
     luminance = 0.299 * arr[:,:,0] + 0.587 * arr[:,:,1] + 0.114 * arr[:,:,2]
     mask = luminance < (255 - threshold)
@@ -168,7 +188,10 @@ def render_single_colored(img: Image.Image, color: str, threshold: int = 30) -> 
     rgb = hex_to_rgb(color)
     h, w = mask.shape
     result = np.zeros((h, w, 4), dtype=np.uint8)
-    result[mask] = [rgb[0], rgb[1], rgb[2], 255]
+    result[mask, 0] = rgb[0]
+    result[mask, 1] = rgb[1]
+    result[mask, 2] = rgb[2]
+    result[mask, 3] = np.clip(255 - luminance[mask], 0, 255).astype(np.uint8)
     return Image.fromarray(result, "RGBA")
 
 
