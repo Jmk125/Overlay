@@ -34,14 +34,22 @@ class WorkspacePixmapItem(QGraphicsPixmapItem):
         self.setScale(self.drawing.scale_factor)
 
     def paint(self, painter: QPainter, option, widget=None):
-        painter.drawPixmap(0, 0, self.pixmap())
-        bg = QColor('#ffffff') if self.drawing.erase_bg == 'white' else QColor('#0d0d0d')
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
+        # Build this drawing on an isolated transparent layer so erase masks
+        # delete only this item's pixels. Painting CompositionMode_Clear
+        # directly on the scene would also punch through drawings underneath.
+        layer = QPixmap(self.pixmap().size())
+        layer.fill(Qt.GlobalColor.transparent)
+        layer_painter = QPainter(layer)
+        layer_painter.drawPixmap(0, 0, self.pixmap())
+        layer_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        layer_painter.setPen(Qt.PenStyle.NoPen)
+        layer_painter.setBrush(Qt.BrushStyle.SolidPattern)
         for r in self.drawing.erase_rects:
-            painter.drawRect(QRectF(
+            layer_painter.drawRect(QRectF(
                 r[0] * self.pixmap().width(), r[1] * self.pixmap().height(),
                 r[2] * self.pixmap().width(), r[3] * self.pixmap().height()))
+        layer_painter.end()
+        painter.drawPixmap(0, 0, layer)
         if self.isSelected():
             pen = QPen(QColor('#00e0ff'))
             pen.setStyle(Qt.PenStyle.DashLine)
