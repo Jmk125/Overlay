@@ -6,8 +6,8 @@ from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QListWidget,
     QListWidgetItem, QFileDialog, QColorDialog, QDoubleSpinBox, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QMessageBox, QComboBox,
-    QScrollArea, QSpinBox
+    QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QMessageBox,
+    QScrollArea, QGraphicsRectItem
 )
 from PIL import Image
 from core.models import DrawingPage, WorkspaceDrawing, OverlaySet
@@ -54,6 +54,7 @@ class WorkspacePixmapItem(QGraphicsPixmapItem):
 class WorkspaceCanvas(QGraphicsView):
     selection_changed = pyqtSignal(object)
     drawing_changed = pyqtSignal()
+    mode_changed = pyqtSignal(str)
 
     MODE_VIEW = 'view'
     MODE_MOVE = 'move'
@@ -74,6 +75,10 @@ class WorkspaceCanvas(QGraphicsView):
         self._drag_start = None
         self._rotate_start = None
         self._erase_start = None
+        self._erase_preview = None
+        self._panning = False
+        self._pan_start = QPointF()
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.gscene.selectionChanged.connect(self._on_scene_selection)
         self.set_canvas_background('white')
 
@@ -88,6 +93,7 @@ class WorkspaceCanvas(QGraphicsView):
 
     def set_mode(self, mode: str):
         self._mode = mode
+        self._clear_erase_preview()
         if mode == self.MODE_MOVE:
             self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
         elif mode == self.MODE_ROTATE:
@@ -96,6 +102,7 @@ class WorkspaceCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         else:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.mode_changed.emit(mode)
 
     def add_drawing(self, drawing: WorkspaceDrawing, pixmap: QPixmap, fit: bool = True):
         drawing.erase_bg = 'white' if self._bg != 'dark' else 'dark'
@@ -129,11 +136,36 @@ class WorkspaceCanvas(QGraphicsView):
         item = self.selected_item()
         self.selection_changed.emit(item.drawing if item else None)
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.set_mode(self.MODE_VIEW)
+            self._drag_start = None
+            self._rotate_start = None
+            self._erase_start = None
+            self._panning = False
+            self._clear_erase_preview()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _clear_erase_preview(self):
+        if self._erase_preview is not None:
+            scene = self._erase_preview.scene()
+            if scene is not None:
+                scene.removeItem(self._erase_preview)
+            self._erase_preview = None
+
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
 
     def mousePressEvent(self, event):
+        self.setFocus()
+        if event.button() == Qt.MouseButton.RightButton:
+            self._panning = True
+            self._pan_start = event.position()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             clicked = self._item_at_event(event)
             if clicked:
@@ -148,10 +180,25 @@ class WorkspaceCanvas(QGraphicsView):
                 return
             if item and self._mode == self.MODE_ERASE:
                 self._erase_start = item.mapFromScene(self.mapToScene(event.position().toPoint()))
+                self._clear_erase_preview()
+                self._erase_preview = QGraphicsRectItem(item)
+                pen = QPen(QColor('#00e0ff'))
+                pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                self._erase_preview.setPen(pen)
+                self._erase_preview.setBrush(QBrush(QColor(0, 224, 255, 35)))
+                self._erase_preview.setZValue(9999)
+                self._erase_preview.setRect(QRectF(self._erase_start, self._erase_start))
                 return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.position() - self._pan_start
+            self._pan_start = event.position()
+            self.horizontalScrollBar().setValue(int(self.horizontalScrollBar().value() - delta.x()))
+            self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() - delta.y()))
+            return
         item = self.selected_item()
         if item and self._drag_start is not None:
             scene_pos = self.mapToScene(event.position().toPoint())
@@ -178,9 +225,19 @@ class WorkspaceCanvas(QGraphicsView):
             self._rotate_start = scene_pos
             self.drawing_changed.emit()
             return
+        if item and self._erase_start is not None and self._erase_preview is not None:
+            end = item.mapFromScene(self.mapToScene(event.position().toPoint()))
+            x0, x1 = sorted([self._erase_start.x(), end.x()])
+            y0, y1 = sorted([self._erase_start.y(), end.y()])
+            self._erase_preview.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._panning and event.button() == Qt.MouseButton.RightButton:
+            self._panning = False
+            self.set_mode(self._mode)
+            return
         if self._erase_start is not None and event.button() == Qt.MouseButton.LeftButton:
             item = self.selected_item()
             end = item.mapFromScene(self.mapToScene(event.position().toPoint())) if item else QPointF()
@@ -193,6 +250,7 @@ class WorkspaceCanvas(QGraphicsView):
                     item.update()
                     self.drawing_changed.emit()
             self._erase_start = None
+            self._clear_erase_preview()
             return
         self._drag_start = None
         self._rotate_start = None
@@ -247,6 +305,7 @@ class EmptyWorkspace(QWidget):
 
         self.canvas = WorkspaceCanvas()
         self.canvas.selection_changed.connect(self._sync_selection)
+        self.canvas.mode_changed.connect(self._sync_mode_buttons)
         root.addWidget(self.canvas, 1)
 
         self.right_bar = self._make_collapsed_bar('‹', 'Show tools', lambda: self._set_right_collapsed(False))
@@ -380,6 +439,8 @@ class EmptyWorkspace(QWidget):
 
     def _set_mode(self, mode: str):
         self.canvas.set_mode(mode)
+
+    def _sync_mode_buttons(self, mode: str):
         self.move_btn.setChecked(mode == 'move')
         self.rotate_btn.setChecked(mode == 'rotate')
         self.erase_btn.setChecked(mode == 'erase')
