@@ -3,7 +3,7 @@ Save and load overlay project state
 """
 import json
 import os
-from core.models import OverlaySet, OverlayPair, DrawingPage
+from core.models import OverlaySet, OverlayPair, DrawingPage, WorkspaceDrawing
 
 
 def save_project(overlay_set: OverlaySet, filepath: str):
@@ -33,8 +33,22 @@ def save_project(overlay_set: OverlaySet, filepath: str):
             'notes': pair.notes,
         }
 
+    def workspace_to_dict(d: WorkspaceDrawing):
+        return {
+            'page': page_to_dict(d.page),
+            'name': d.name,
+            'drawing_id': d.drawing_id,
+            'color': d.color,
+            'offset_x': d.offset_x,
+            'offset_y': d.offset_y,
+            'rotation': d.rotation,
+            'scale_factor': d.scale_factor,
+            'erase_rects': d.erase_rects,
+            'erase_bg': d.erase_bg,
+        }
+
     data = {
-        'version': 1,
+        'version': 2,
         'set_a_label': overlay_set.set_a_label,
         'set_b_label': overlay_set.set_b_label,
         'color_a': overlay_set.color_a,
@@ -43,6 +57,8 @@ def save_project(overlay_set: OverlaySet, filepath: str):
         'canvas_bg': overlay_set.canvas_bg,
         'render_dpi': overlay_set.render_dpi,
         'export_dpi': overlay_set.export_dpi,
+        'workspace_mode': overlay_set.workspace_mode,
+        'workspace_drawings': [workspace_to_dict(d) for d in overlay_set.workspace_drawings],
         'pairs': [pair_to_dict(p) for p in overlay_set.pairs],
         'unmatched_a': [page_to_dict(p) for p in overlay_set.unmatched_a],
         'unmatched_b': [page_to_dict(p) for p in overlay_set.unmatched_b],
@@ -73,6 +89,7 @@ def load_project(filepath: str) -> OverlaySet:
         canvas_bg=data.get('canvas_bg', 'white'),
         render_dpi=data.get('render_dpi', 120),
         export_dpi=data.get('export_dpi', 200),
+        workspace_mode=data.get('workspace_mode', False),
     )
 
     for pd in data.get('pairs', []):
@@ -92,6 +109,20 @@ def load_project(filepath: str) -> OverlaySet:
             notes=pd.get('notes', '') or '',
         )
         overlay_set.pairs.append(pair)
+
+    for wd in data.get('workspace_drawings', []):
+        overlay_set.workspace_drawings.append(WorkspaceDrawing(
+            page=dict_to_page(wd['page']),
+            name=wd.get('name', ''),
+            drawing_id=wd.get('drawing_id', ''),
+            color=wd.get('color', '#000000'),
+            offset_x=wd.get('offset_x', 0.0),
+            offset_y=wd.get('offset_y', 0.0),
+            rotation=wd.get('rotation', 0.0),
+            scale_factor=wd.get('scale_factor', 1.0),
+            erase_rects=wd.get('erase_rects', []) or [],
+            erase_bg=wd.get('erase_bg', 'white'),
+        ))
 
     overlay_set.unmatched_a = [dict_to_page(d) for d in data.get('unmatched_a', [])]
     overlay_set.unmatched_b = [dict_to_page(d) for d in data.get('unmatched_b', [])]
