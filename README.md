@@ -25,6 +25,17 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Drag & drop** — drop PDF files, image files, a dragged image/snapshot, or (where the app supports it) a page dragged straight out of Bluebeam/Acrobat onto the Set A / Set B panels
 - **Customizable controls** — set zoom (scroll vs. Ctrl+scroll), pan button (left/middle/right), and edge antialiasing in Preferences
 
+### Empty Workspace
+
+Assemble many drawings freely on one blank canvas (Landing ▸ *Create Empty Workspace*).
+
+- **Import** individual PDF/image pages (or a page open in Bluebeam/Acrobat) and move, rotate, recolor or erase each one independently
+- **Scale to drawing scale** — set a workspace **reference scale** (e.g. 1/4" = 1') and each drawing's own scale; *Match to Reference* auto-resizes drawings so they share a common real-world size, and *Match ALL* normalizes the whole set at once
+- **Show / hide** any drawing with the checkbox in the drawings pane (hidden drawings are skipped on export); *Show all* / *Hide all* toggle everything
+- **Click to select** — single-click a drawing on the canvas to select it; where drawings overlap, a chooser pops up listing them by name so you can pick the right one. Selecting from the drawings pane still works too. Move/rotate/erase act on the selected drawing, so the tools no longer fight the selection
+- **Rename** (double-click in the list), **remove** (🗑 / Delete key), and reorder with **Bring to Front / Send to Back**
+- **Export** the workspace (visible drawings only) as **PDF** or **PNG** from the Save section
+
 ## Keyboard Shortcuts
 
 | Key | Action |

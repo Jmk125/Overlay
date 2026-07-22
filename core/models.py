@@ -61,6 +61,8 @@ class WorkspaceDrawing:
     offset_y: float = 0.0
     rotation: float = 0.0
     scale_factor: float = 1.0
+    scale_str: str = ""      # this drawing's own drawing scale, e.g. 1/8" = 1'
+    visible: bool = True     # toggled on/off in the drawings pane
     erase_rects: list = field(default_factory=list)
     erase_bg: str = "white"
 
@@ -87,6 +89,9 @@ class OverlaySet:
     export_dpi: int = 200      # resolution used when exporting PNG/PDF
     workspace_mode: bool = False
     workspace_drawings: list = field(default_factory=list)
+    # Real-world reference scale for the workspace (e.g. 1/8" = 1'). When set,
+    # each drawing can be auto-resized so its drawing scale matches this.
+    workspace_ref_scale: str = ""
 
 
 # Common architectural/engineering scales

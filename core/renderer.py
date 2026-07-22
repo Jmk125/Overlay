@@ -65,6 +65,18 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
+def qimage_to_pil(qimg: QImage) -> Image.Image:
+    """Convert a QImage to a PIL RGBA image (via an in-memory PNG)."""
+    from PyQt6.QtCore import QBuffer, QByteArray
+    ba = QByteArray()
+    qbuf = QBuffer(ba)
+    qbuf.open(QBuffer.OpenModeFlag.WriteOnly)
+    qimg.save(qbuf, "PNG")
+    buf = io.BytesIO(bytes(ba))
+    buf.seek(0)
+    return Image.open(buf).convert("RGBA")
+
+
 def apply_transform(img: Image.Image, offset_x: float, offset_y: float,
                     rotation: float, pivot_x: float, pivot_y: float,
                     scale_factor: float, canvas_size: tuple) -> Image.Image:
