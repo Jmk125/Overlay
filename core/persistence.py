@@ -43,6 +43,8 @@ def save_project(overlay_set: OverlaySet, filepath: str):
             'offset_y': d.offset_y,
             'rotation': d.rotation,
             'scale_factor': d.scale_factor,
+            'scale_str': d.scale_str,
+            'visible': d.visible,
             'erase_rects': d.erase_rects,
             'erase_bg': d.erase_bg,
         }
@@ -58,6 +60,7 @@ def save_project(overlay_set: OverlaySet, filepath: str):
         'render_dpi': overlay_set.render_dpi,
         'export_dpi': overlay_set.export_dpi,
         'workspace_mode': overlay_set.workspace_mode,
+        'workspace_ref_scale': overlay_set.workspace_ref_scale,
         'workspace_drawings': [workspace_to_dict(d) for d in overlay_set.workspace_drawings],
         'pairs': [pair_to_dict(p) for p in overlay_set.pairs],
         'unmatched_a': [page_to_dict(p) for p in overlay_set.unmatched_a],
@@ -90,6 +93,7 @@ def load_project(filepath: str) -> OverlaySet:
         render_dpi=data.get('render_dpi', 120),
         export_dpi=data.get('export_dpi', 200),
         workspace_mode=data.get('workspace_mode', False),
+        workspace_ref_scale=data.get('workspace_ref_scale', ''),
     )
 
     for pd in data.get('pairs', []):
@@ -120,6 +124,8 @@ def load_project(filepath: str) -> OverlaySet:
             offset_y=wd.get('offset_y', 0.0),
             rotation=wd.get('rotation', 0.0),
             scale_factor=wd.get('scale_factor', 1.0),
+            scale_str=wd.get('scale_str', ''),
+            visible=wd.get('visible', True),
             erase_rects=wd.get('erase_rects', []) or [],
             erase_bg=wd.get('erase_bg', 'white'),
         ))
