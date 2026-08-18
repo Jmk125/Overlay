@@ -172,6 +172,7 @@ class MaskedOverlayItem(QGraphicsItem):
         self._cutout = False
         self._other_pixmap = None
         self._other_transform = QTransform()
+        self._bg_color = QColor('#ffffff')
         self.setZValue(900)   # above the base layers, below markups (1000)
 
     def boundingRect(self) -> QRectF:
@@ -205,6 +206,10 @@ class MaskedOverlayItem(QGraphicsItem):
         self._other_transform = transform
         self.update()
 
+    def set_bg_color(self, color: QColor):
+        self._bg_color = color
+        self.update()
+
     def paint(self, painter, option, widget=None):
         path = R.mask_clip_qpath(self._masks, self._w, self._h)
         if not path.isEmpty():
@@ -212,6 +217,13 @@ class MaskedOverlayItem(QGraphicsItem):
             painter.setClipPath(path)   # clip stays fixed in canvas coords
             if self._cutout:
                 if self._other_pixmap:
+                    # The base layer is painted underneath this item, so a
+                    # blank (no-ink) patch of the "other" drawing would let
+                    # it bleed through here otherwise. Paint the canvas
+                    # background first to fully occlude the base within the
+                    # hole — a real cutout reveals the whole other sheet,
+                    # not just its ink over a see-through gap.
+                    painter.fillRect(self.boundingRect(), self._bg_color)
                     painter.setTransform(self._other_transform, True)
                     painter.drawPixmap(0, 0, self._other_pixmap)
             elif self._composite_pixmap:
@@ -326,6 +338,8 @@ class OverlayCanvas(QGraphicsView):
         color = "#ffffff" if self._bg_white else "#0d0d0d"
         self.setStyleSheet(f"background: {color}; border: none;")
         self.gscene.setBackgroundBrush(QBrush(QColor(color)))
+        if getattr(self, '_mask_item', None):
+            self._mask_item.set_bg_color(QColor(color))
 
     def set_background(self, white: bool):
         self._bg_white = white
@@ -404,6 +418,7 @@ class OverlayCanvas(QGraphicsView):
         self._mask_item = MaskedOverlayItem(self._canvas_w, self._canvas_h)
         self.gscene.addItem(self._mask_item)
         self._mask_item.set_composite_pixmap(pix_composite)
+        self._mask_item.set_bg_color(QColor('#ffffff' if self._bg_white else '#0d0d0d'))
         self._mask_points = []
         if pair is not None:
             self._mask_item.set_masks(pair.masks)
