@@ -153,9 +153,14 @@ class MarkupOverlayItem(QGraphicsItem):
 
 
 class MaskedOverlayItem(QGraphicsItem):
-    """Paints the composite pixmap clipped to the union of mask polygons (so
-    the full A+B overlay only shows through the masked "windows"), plus
-    dashed outlines of each mask and the one currently being drawn."""
+    """Paints content clipped to the union of mask polygons, plus dashed
+    outlines of each mask and the one currently being drawn.
+
+    Normally the clipped content is the composite pixmap (full A+B overlay
+    shows through the masked "windows"). In cutout mode it's the OTHER
+    drawing instead — a punched-hole reveal of just that drawing, with no
+    blending — positioned with its own transform since the "other" drawing
+    may be B (which is not canvas-aligned like the composite/A layer are)."""
     def __init__(self, w: float, h: float):
         super().__init__()
         self._w = float(w)
@@ -164,6 +169,9 @@ class MaskedOverlayItem(QGraphicsItem):
         self._masks = []
         self._pending_points = []
         self._show_outlines = False
+        self._cutout = False
+        self._other_pixmap = None
+        self._other_transform = QTransform()
         self.setZValue(900)   # above the base layers, below markups (1000)
 
     def boundingRect(self) -> QRectF:
@@ -185,14 +193,30 @@ class MaskedOverlayItem(QGraphicsItem):
         self._show_outlines = on
         self.update()
 
+    def set_cutout(self, on: bool):
+        self._cutout = on
+        self.update()
+
+    def set_other_pixmap(self, pixmap):
+        self._other_pixmap = pixmap
+        self.update()
+
+    def set_other_transform(self, transform: QTransform):
+        self._other_transform = transform
+        self.update()
+
     def paint(self, painter, option, widget=None):
-        if self._composite_pixmap:
-            path = R.mask_clip_qpath(self._masks, self._w, self._h)
-            if not path.isEmpty():
-                painter.save()
-                painter.setClipPath(path)
+        path = R.mask_clip_qpath(self._masks, self._w, self._h)
+        if not path.isEmpty():
+            painter.save()
+            painter.setClipPath(path)   # clip stays fixed in canvas coords
+            if self._cutout:
+                if self._other_pixmap:
+                    painter.setTransform(self._other_transform, True)
+                    painter.drawPixmap(0, 0, self._other_pixmap)
+            elif self._composite_pixmap:
                 painter.drawPixmap(0, 0, self._composite_pixmap)
-                painter.restore()
+            painter.restore()
 
         if not self._show_outlines:
             return
@@ -358,6 +382,11 @@ class OverlayCanvas(QGraphicsView):
         self._pair = pair
         self._b_size = (pix_b.width(), pix_b.height()) if pix_b else None
         self.gscene.clear()
+        # gscene.clear() just deleted the underlying C++ objects for these —
+        # drop the stale Python references so nothing touches them before
+        # they're recreated below (_apply_b_transform syncs the mask layer).
+        self._mask_item = None
+        self._markup_item = None
         self._item_a = self.gscene.addPixmap(pix_a if pix_a else QPixmap())
         self._item_b = self.gscene.addPixmap(pix_b if pix_b else QPixmap())
         self._item_composite = self.gscene.addPixmap(pix_composite if pix_composite else QPixmap())
@@ -378,6 +407,7 @@ class OverlayCanvas(QGraphicsView):
         self._mask_points = []
         if pair is not None:
             self._mask_item.set_masks(pair.masks)
+        self._sync_mask_cutout_layer()
 
         # Markup overlay sits above everything.
         self._markup_item = MarkupOverlayItem(self._canvas_w, self._canvas_h)
@@ -488,20 +518,39 @@ class OverlayCanvas(QGraphicsView):
                 return
         super().keyPressEvent(event)
 
-    def _apply_b_transform(self):
-        """Position/rotate/scale the B layer live using a Qt affine transform
+    def _b_qtransform(self) -> QTransform:
+        """The Qt affine transform that positions/rotates/scales the B layer,
         derived from the same matrix that drives the final composite."""
-        if not self._item_b or not self._pair or not self._b_size:
-            return
+        if not self._pair or not self._b_size:
+            return QTransform()
         w, h = self._b_size
         p = self._pair
         M = R.forward_matrix(w, h, p.offset_x, p.offset_y, p.rotation,
                              p.pivot_x, p.pivot_y, p.scale_factor)
         # Qt maps (row-vector): x' = m11*x + m21*y + dx; y' = m12*x + m22*y + dy
-        t = QTransform(M[0, 0], M[1, 0],
-                       M[0, 1], M[1, 1],
-                       M[0, 2], M[1, 2])
-        self._item_b.setTransform(t)
+        return QTransform(M[0, 0], M[1, 0],
+                          M[0, 1], M[1, 1],
+                          M[0, 2], M[1, 2])
+
+    def _apply_b_transform(self):
+        if not self._item_b:
+            return
+        self._item_b.setTransform(self._b_qtransform())
+        self._sync_mask_cutout_layer()
+
+    def _sync_mask_cutout_layer(self):
+        """Keep the mask-cutout preview's "other drawing" pixmap/transform in
+        sync with the current pair (mask_base flip, cutout toggle, or a live
+        move/rotate of B)."""
+        if not self._mask_item or not self._pair:
+            return
+        self._mask_item.set_cutout(getattr(self._pair, 'mask_cutout', False))
+        if self._pair.mask_base == 'a':
+            self._mask_item.set_other_pixmap(self._pix_b)
+            self._mask_item.set_other_transform(self._b_qtransform())
+        else:
+            self._mask_item.set_other_pixmap(self._pix_a)
+            self._mask_item.set_other_transform(QTransform())
 
     def set_view_mode(self, mode: str):
         """mode: 'composite', 'a', or 'b'"""
@@ -542,9 +591,11 @@ class OverlayCanvas(QGraphicsView):
             self._mask_item.setVisible(mask_mode or self._mode == self.MODE_MASK)
             self._mask_item.set_show_outlines(self._mode == self.MODE_MASK)
 
-    def refresh_mask_base(self):
-        """Re-evaluate layer visibility after `pair.mask_base` changes."""
+    def refresh_mask_view(self):
+        """Re-evaluate visibility and the cutout layer after `pair.mask_base`
+        or `pair.mask_cutout` changes."""
         self._update_visibility()
+        self._sync_mask_cutout_layer()
 
     def wheelEvent(self, event: QWheelEvent):
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -1047,8 +1098,9 @@ class OverlayViewer(QWidget):
         # through a single base drawing.
         mask_section = CollapsibleSection("Mask (Windowed Overlay)", collapsed=True)
         mask_section.addWidget(QLabel(
-            "Base shows outside the mask; the full overlay shows inside it. "
-            "Switch View to “Masked Overlay” to see the result.",
+            "Base shows outside the mask; inside it shows either the full "
+            "overlay or (with Cutout) just the other drawing. Switch View to "
+            "“Masked Overlay” to see the result.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
 
         base_row = QHBoxLayout()
@@ -1063,6 +1115,12 @@ class OverlayViewer(QWidget):
             base_row.addWidget(b)
         self.mask_base_btns['a'].setChecked(True)
         mask_section.addLayout(base_row)
+
+        self.mask_cutout_chk = QCheckBox(
+            "Cutout: reveal only the other drawing inside the mask (no overlay)")
+        self.mask_cutout_chk.setStyleSheet("color:#ccc;")
+        self.mask_cutout_chk.toggled.connect(self._on_mask_cutout_toggled)
+        mask_section.addWidget(self.mask_cutout_chk)
 
         self.draw_mask_btn = QPushButton("✛ Draw Mask (click points, double-click/Enter to close)")
         self.draw_mask_btn.setCheckable(True)
@@ -1245,9 +1303,12 @@ class OverlayViewer(QWidget):
         self.notes_edit.setPlainText(pair.notes or "")
         self.notes_edit.blockSignals(False)
 
-        # Sync the mask base selector to this pair.
+        # Sync the mask base selector and cutout toggle to this pair.
         self.mask_base_btns['a'].setChecked(pair.mask_base != 'b')
         self.mask_base_btns['b'].setChecked(pair.mask_base == 'b')
+        self.mask_cutout_chk.blockSignals(True)
+        self.mask_cutout_chk.setChecked(pair.mask_cutout)
+        self.mask_cutout_chk.blockSignals(False)
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
@@ -1509,7 +1570,11 @@ class OverlayViewer(QWidget):
         pair.mask_base = which
         self.mask_base_btns['a'].setChecked(which == 'a')
         self.mask_base_btns['b'].setChecked(which == 'b')
-        self.canvas.refresh_mask_base()
+        self.canvas.refresh_mask_view()
+
+    def _on_mask_cutout_toggled(self, checked: bool):
+        self._current_pair().mask_cutout = checked
+        self.canvas.refresh_mask_view()
 
     def _pick_markup_color(self):
         c = QColorDialog.getColor(QColor(self._markup_color), self, "Markup Color")
@@ -1637,20 +1702,30 @@ class OverlayViewer(QWidget):
                 content = R.render_single_colored(img_a, self.overlay_set.color_a)
             elif view_mode == 'b':
                 content = R.render_single_colored(img_b, self.overlay_set.color_b)
-            else:
-                composite = R.composite_overlay(img_a, img_b,
-                                                 self.overlay_set.color_a,
-                                                 self.overlay_set.color_b,
-                                                 shared_color=self.overlay_set.shared_color)
-                if view_mode == 'mask':
-                    base_color = (self.overlay_set.color_a if pair.mask_base == 'a'
-                                  else self.overlay_set.color_b)
-                    base_src = img_a if pair.mask_base == 'a' else img_b
-                    base_solo = R.render_single_colored(base_src, base_color)
-                    content = R.composite_masked(composite, base_solo, pair.masks,
-                                                  img_a.width, img_a.height)
+            elif view_mode == 'mask':
+                base_color = (self.overlay_set.color_a if pair.mask_base == 'a'
+                              else self.overlay_set.color_b)
+                base_src = img_a if pair.mask_base == 'a' else img_b
+                base_solo = R.render_single_colored(base_src, base_color)
+                if pair.mask_cutout:
+                    # Cutout: the hole reveals the OTHER drawing alone, not
+                    # the two blended together.
+                    other_color = (self.overlay_set.color_b if pair.mask_base == 'a'
+                                   else self.overlay_set.color_a)
+                    other_src = img_b if pair.mask_base == 'a' else img_a
+                    inside = R.render_single_colored(other_src, other_color)
                 else:
-                    content = composite
+                    inside = R.composite_overlay(img_a, img_b,
+                                                  self.overlay_set.color_a,
+                                                  self.overlay_set.color_b,
+                                                  shared_color=self.overlay_set.shared_color)
+                content = R.composite_masked(inside, base_solo, pair.masks,
+                                              img_a.width, img_a.height)
+            else:
+                content = R.composite_overlay(img_a, img_b,
+                                               self.overlay_set.color_a,
+                                               self.overlay_set.color_b,
+                                               shared_color=self.overlay_set.shared_color)
 
             # White background for export
             bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
