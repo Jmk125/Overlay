@@ -14,7 +14,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QFont, QPixmap, QWheelEvent, QMouseEvent, QPainter,
-    QColor, QPen, QBrush, QKeySequence, QShortcut, QCursor, QTransform
+    QColor, QPen, QBrush, QKeySequence, QShortcut, QCursor, QTransform,
+    QPolygonF
 )
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -151,6 +152,70 @@ class MarkupOverlayItem(QGraphicsItem):
                     painter.drawRect(QRectF(hx - 3, hy - 3, 6, 6))
 
 
+class MaskedOverlayItem(QGraphicsItem):
+    """Paints the composite pixmap clipped to the union of mask polygons (so
+    the full A+B overlay only shows through the masked "windows"), plus
+    dashed outlines of each mask and the one currently being drawn."""
+    def __init__(self, w: float, h: float):
+        super().__init__()
+        self._w = float(w)
+        self._h = float(h)
+        self._composite_pixmap = None
+        self._masks = []
+        self._pending_points = []
+        self._show_outlines = False
+        self.setZValue(900)   # above the base layers, below markups (1000)
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0, 0, self._w, self._h)
+
+    def set_composite_pixmap(self, pixmap):
+        self._composite_pixmap = pixmap
+        self.update()
+
+    def set_masks(self, masks: list):
+        self._masks = masks
+        self.update()
+
+    def set_pending_points(self, points: list):
+        self._pending_points = points
+        self.update()
+
+    def set_show_outlines(self, on: bool):
+        self._show_outlines = on
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        if self._composite_pixmap:
+            path = R.mask_clip_qpath(self._masks, self._w, self._h)
+            if not path.isEmpty():
+                painter.save()
+                painter.setClipPath(path)
+                painter.drawPixmap(0, 0, self._composite_pixmap)
+                painter.restore()
+
+        if not self._show_outlines:
+            return
+        pen = QPen(QColor('#ffb300'))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for m in self._masks:
+            pts = m.get('points', [])
+            if len(pts) >= 2:
+                poly = QPolygonF([QPointF(p[0] * self._w, p[1] * self._h) for p in pts])
+                painter.drawPolygon(poly)
+        if self._pending_points:
+            poly_pts = [QPointF(p[0] * self._w, p[1] * self._h) for p in self._pending_points]
+            if len(poly_pts) >= 2:
+                painter.drawPolyline(QPolygonF(poly_pts))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#ffb300'))
+            for p in poly_pts:
+                painter.drawEllipse(p, 4, 4)
+
+
 class OverlayCanvas(QGraphicsView):
     """
     The main canvas.
@@ -162,11 +227,13 @@ class OverlayCanvas(QGraphicsView):
     pair_changed = pyqtSignal()    # committed change -> recompute composite
     pair_preview = pyqtSignal()    # live change during a drag -> no recompute
     markups_changed = pyqtSignal() # a markup was added / removed
+    masks_changed = pyqtSignal()   # a mask was added / removed
 
     MODE_VIEW = 0
     MODE_MOVE = 1
     MODE_ROTATE = 2
     MODE_MARKUP = 3
+    MODE_MASK = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -210,6 +277,11 @@ class OverlayCanvas(QGraphicsView):
         self._selected_markup = None      # index of selected markup
         self._select_dragging = False
         self._select_last = None
+
+        # Masks (windowed overlay)
+        self._mask_item = None
+        self._mask_points = []            # in-progress polygon, normalized 0-1
+
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # receive Delete key
 
         # Live layered preview (A + transformed B) — on while aligning
@@ -260,6 +332,8 @@ class OverlayCanvas(QGraphicsView):
             self.gscene.update()
 
     def set_mode(self, mode: int):
+        if self._mode == self.MODE_MASK and mode != self.MODE_MASK:
+            self.mask_cancel_pending()
         self._mode = mode
         if mode == self.MODE_VIEW:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
@@ -269,9 +343,12 @@ class OverlayCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         elif mode == self.MODE_MARKUP:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        elif mode == self.MODE_MASK:
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         # Selecting a tool does NOT switch to the live colored preview — that
         # only happens while you actually drag (see mousePressEvent). When idle
         # the canvas stays flattened to the composite.
+        self._update_visibility()
 
     def load_pixmaps(self, pix_a, pix_b, pix_composite, pair: OverlayPair,
                      reset_view: bool = False):
@@ -290,10 +367,19 @@ class OverlayCanvas(QGraphicsView):
             item.setTransformationMode(mode)
         self._apply_b_transform()
 
-        # Markup overlay sits above everything, sized to the canvas (A page).
+        # Masked-overlay layer: composite clipped to the mask polygon(s), sits
+        # above the base layers, sized to the canvas (A page).
         cw = pix_composite.width() if pix_composite else (pix_a.width() if pix_a else 1)
         ch = pix_composite.height() if pix_composite else (pix_a.height() if pix_a else 1)
         self._canvas_w, self._canvas_h = float(cw), float(ch)
+        self._mask_item = MaskedOverlayItem(self._canvas_w, self._canvas_h)
+        self.gscene.addItem(self._mask_item)
+        self._mask_item.set_composite_pixmap(pix_composite)
+        self._mask_points = []
+        if pair is not None:
+            self._mask_item.set_masks(pair.masks)
+
+        # Markup overlay sits above everything.
         self._markup_item = MarkupOverlayItem(self._canvas_w, self._canvas_h)
         self.gscene.addItem(self._markup_item)
         self._selected_markup = None
@@ -388,6 +474,18 @@ class OverlayCanvas(QGraphicsView):
                 and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)):
             self.markup_delete_selected()
             return
+        if self._mode == self.MODE_MASK:
+            if event.key() == Qt.Key.Key_Escape:
+                self.mask_cancel_pending()
+                return
+            if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self._mask_points:
+                self._mask_points.pop()
+                if self._mask_item:
+                    self._mask_item.set_pending_points(self._mask_points)
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_mask_polygon()
+                return
         super().keyPressEvent(event)
 
     def _apply_b_transform(self):
@@ -425,14 +523,28 @@ class OverlayCanvas(QGraphicsView):
         if not self._item_composite:
             return
         live = self._live
+        # In the "mask" view, only the chosen base drawing (A or B) shows
+        # outside the mask(s); the composite shows through inside them.
+        mask_mode = (not live) and self._view_mode == 'mask'
+        mask_base = (self._pair.mask_base if self._pair else 'a') if mask_mode else None
+
         # Live: overlay A + (transformed) B layers. Otherwise: chosen view.
         self._item_composite.setVisible((not live) and self._view_mode == 'composite')
         if self._item_a:
-            self._item_a.setVisible(live or self._view_mode == 'a')
+            self._item_a.setVisible(live or self._view_mode == 'a' or mask_base == 'a')
         if self._item_b:
-            self._item_b.setVisible(live or self._view_mode == 'b')
+            self._item_b.setVisible(live or self._view_mode == 'b' or mask_base == 'b')
             # Make B translucent while aligning so overlaps are visible.
             self._item_b.setOpacity(0.6 if live else 1.0)
+        if self._mask_item:
+            # Show the clipped composite window either in the mask view, or
+            # live while the mask-draw tool is active (as an editing preview).
+            self._mask_item.setVisible(mask_mode or self._mode == self.MODE_MASK)
+            self._mask_item.set_show_outlines(self._mode == self.MODE_MASK)
+
+    def refresh_mask_base(self):
+        """Re-evaluate layer visibility after `pair.mask_base` changes."""
+        self._update_visibility()
 
     def wheelEvent(self, event: QWheelEvent):
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -445,9 +557,9 @@ class OverlayCanvas(QGraphicsView):
 
     def _pan_blocked_on_left(self) -> bool:
         """If panning is bound to the left button, don't pan while a tool that
-        uses the left drag (align or markup) is active."""
+        uses the left drag (align, markup or mask) is active."""
         return (self._pan_button == Qt.MouseButton.LeftButton
-                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP))
+                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP, self.MODE_MASK))
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == self._pan_button and not self._pan_blocked_on_left():
@@ -473,6 +585,11 @@ class OverlayCanvas(QGraphicsView):
                     'width': self._markup_width,
                 }
                 self._markup_item.set_pending(self._pending_markup)
+                return
+            if self._mode == self.MODE_MASK and self._mask_item is not None:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                self._mask_points.append(self._scene_to_norm(scene_pt))
+                self._mask_item.set_pending_points(self._mask_points)
                 return
             if self._mode in (self.MODE_MOVE, self.MODE_ROTATE):
                 self._drag_start = self.mapToScene(event.position().toPoint())
@@ -571,6 +688,41 @@ class OverlayCanvas(QGraphicsView):
             self._b_dragging = False
             self.pair_changed.emit()
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._mode == self.MODE_MASK and event.button() == Qt.MouseButton.LeftButton:
+            self._finish_mask_polygon()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    # ── Masks ─────────────────────────────────────────────────────
+    def _finish_mask_polygon(self):
+        """Close the in-progress polygon (needs >= 3 points) into a new mask."""
+        if self._pair is not None and len(self._mask_points) >= 3:
+            self._pair.masks.append({'points': [list(p) for p in self._mask_points]})
+            if self._mask_item:
+                self._mask_item.set_masks(self._pair.masks)
+            self.masks_changed.emit()
+        self.mask_cancel_pending()
+
+    def mask_cancel_pending(self):
+        self._mask_points = []
+        if self._mask_item:
+            self._mask_item.set_pending_points([])
+
+    def mask_undo(self):
+        if self._pair and self._pair.masks:
+            self._pair.masks.pop()
+            if self._mask_item:
+                self._mask_item.set_masks(self._pair.masks)
+            self.masks_changed.emit()
+
+    def mask_clear(self):
+        if self._pair and self._pair.masks:
+            self._pair.masks.clear()
+            if self._mask_item:
+                self._mask_item.set_masks(self._pair.masks)
+            self.masks_changed.emit()
 
     def fit_view(self):
         self.fitInView(self.gscene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -722,7 +874,8 @@ class OverlayViewer(QWidget):
         self.view_btns = {}
         for key, label in [('composite', 'Overlay (Both)'),
                             ('a', 'Set A only'),
-                            ('b', 'Set B only')]:
+                            ('b', 'Set B only'),
+                            ('mask', 'Masked Overlay')]:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setStyleSheet(self._toggle_btn_style())
@@ -890,6 +1043,50 @@ class OverlayViewer(QWidget):
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
+        # Masks section — carve out a "window" where the full overlay shows
+        # through a single base drawing.
+        mask_section = CollapsibleSection("Mask (Windowed Overlay)", collapsed=True)
+        mask_section.addWidget(QLabel(
+            "Base shows outside the mask; the full overlay shows inside it. "
+            "Switch View to “Masked Overlay” to see the result.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+
+        base_row = QHBoxLayout()
+        base_row.addWidget(QLabel("Base:"))
+        self.mask_base_btns = {}
+        for key, label in [('a', 'Set A'), ('b', 'Set B')]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setStyleSheet(self._toggle_btn_style())
+            b.clicked.connect(lambda _, k=key: self._set_mask_base(k))
+            self.mask_base_btns[key] = b
+            base_row.addWidget(b)
+        self.mask_base_btns['a'].setChecked(True)
+        mask_section.addLayout(base_row)
+
+        self.draw_mask_btn = QPushButton("✛ Draw Mask (click points, double-click/Enter to close)")
+        self.draw_mask_btn.setCheckable(True)
+        self.draw_mask_btn.setStyleSheet(self._toggle_btn_style())
+        self.draw_mask_btn.clicked.connect(self._toggle_mask_draw)
+        mask_section.addWidget(self.draw_mask_btn)
+
+        mask_uc_row = QHBoxLayout()
+        mask_undo_btn = QPushButton("↶ Undo Last Mask")
+        mask_undo_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
+        mask_undo_btn.clicked.connect(self.canvas.mask_undo)
+        mask_clear_btn = QPushButton("Clear Masks")
+        mask_clear_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
+        mask_clear_btn.clicked.connect(self.canvas.mask_clear)
+        mask_uc_row.addWidget(mask_undo_btn)
+        mask_uc_row.addWidget(mask_clear_btn)
+        mask_section.addLayout(mask_uc_row)
+
+        mask_section.addWidget(QLabel(
+            "Click to place points; double-click or Enter closes the shape. "
+            "Esc cancels it; Backspace removes its last point.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+        right_layout.addWidget(mask_section)
+
         # Notes section (per drawing)
         notes_section = CollapsibleSection("Notes (this drawing)", collapsed=True)
         self.notes_edit = QPlainTextEdit()
@@ -945,6 +1142,7 @@ class OverlayViewer(QWidget):
         QShortcut(QKeySequence("1"), self, lambda: self._set_view('composite'))
         QShortcut(QKeySequence("2"), self, lambda: self._set_view('a'))
         QShortcut(QKeySequence("3"), self, lambda: self._set_view('b'))
+        QShortcut(QKeySequence("4"), self, lambda: self._set_view('mask'))
         QShortcut(QKeySequence("F"), self, self.canvas.fit_view)
 
     def _make_collapsed_bar(self, arrow: str, tooltip: str, on_click) -> QWidget:
@@ -1046,6 +1244,10 @@ class OverlayViewer(QWidget):
         self.notes_edit.blockSignals(True)
         self.notes_edit.setPlainText(pair.notes or "")
         self.notes_edit.blockSignals(False)
+
+        # Sync the mask base selector to this pair.
+        self.mask_base_btns['a'].setChecked(pair.mask_base != 'b')
+        self.mask_base_btns['b'].setChecked(pair.mask_base == 'b')
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
@@ -1276,18 +1478,38 @@ class OverlayViewer(QWidget):
             self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
             self.move_btn.setChecked(False)
             self.rotate_btn.setChecked(False)
-        # Leaving markup mode — clear the markup tool buttons.
+        # Leaving markup/mask mode — clear their tool buttons.
         for b in self.markup_btns.values():
             b.setChecked(False)
+        self.draw_mask_btn.setChecked(False)
 
     def _set_markup_tool(self, tool: str):
         self.canvas.set_markup_tool(tool)
         self.canvas.set_mode(OverlayCanvas.MODE_MARKUP)
         for k, b in self.markup_btns.items():
             b.setChecked(k == tool)
-        # Markup mode is exclusive with the align tools.
+        # Markup mode is exclusive with the align and mask tools.
         self.move_btn.setChecked(False)
         self.rotate_btn.setChecked(False)
+        self.draw_mask_btn.setChecked(False)
+
+    def _toggle_mask_draw(self):
+        if self.draw_mask_btn.isChecked():
+            self.canvas.set_mode(OverlayCanvas.MODE_MASK)
+            # Mask-drawing is exclusive with the align and markup tools.
+            self.move_btn.setChecked(False)
+            self.rotate_btn.setChecked(False)
+            for b in self.markup_btns.values():
+                b.setChecked(False)
+        else:
+            self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
+
+    def _set_mask_base(self, which: str):
+        pair = self._current_pair()
+        pair.mask_base = which
+        self.mask_base_btns['a'].setChecked(which == 'a')
+        self.mask_base_btns['b'].setChecked(which == 'b')
+        self.canvas.refresh_mask_base()
 
     def _pick_markup_color(self):
         c = QColorDialog.getColor(QColor(self._markup_color), self, "Markup Color")
@@ -1375,9 +1597,21 @@ class OverlayViewer(QWidget):
         self.canvas._apply_b_transform()
         self._render_timer.start()
 
+    def _current_view_mode(self) -> str:
+        for k, btn in self.view_btns.items():
+            if btn.isChecked():
+                return k
+        return 'composite'
+
     def _export(self, fmt: str):
         pair = self._current_pair()
-        default_name = f"overlay_{pair.page_a.sheet_number or 'sheet'}.{fmt}"
+        view_mode = self._current_view_mode()
+        name_part = {
+            'a': self.overlay_set.set_a_label,
+            'b': self.overlay_set.set_b_label,
+            'mask': 'masked_overlay',
+        }.get(view_mode, 'overlay')
+        default_name = f"{name_part}_{pair.page_a.sheet_number or 'sheet'}.{fmt}".replace(' ', '_')
         path, _ = QFileDialog.getSaveFileName(
             self, f"Export {fmt.upper()}",
             os.path.join(self.settings.get('export_path', ''), default_name),
@@ -1387,20 +1621,40 @@ class OverlayViewer(QWidget):
             return
 
         try:
-            # Re-render at export quality (independent of the on-screen DPI)
+            # Re-render at export quality (independent of the on-screen DPI).
+            # Export exactly what's currently shown: solo A/B for those views,
+            # the full overlay only for the composite/mask views.
             dpi = getattr(self.overlay_set, 'export_dpi', None) or self.overlay_set.render_dpi
             img_a = R.render_page(pair.page_a.pdf_path, pair.page_a.page_index, dpi)
-            img_b_raw = R.render_page(pair.page_b.pdf_path, pair.page_b.page_index, dpi)
-            img_b = R.apply_transform(img_b_raw, pair.offset_x, pair.offset_y,
-                                       pair.rotation, pair.pivot_x, pair.pivot_y,
-                                       pair.scale_factor, img_a.size)
-            composite = R.composite_overlay(img_a, img_b,
-                                             self.overlay_set.color_a,
-                                             self.overlay_set.color_b)
+            img_b = None
+            if view_mode != 'a':
+                img_b_raw = R.render_page(pair.page_b.pdf_path, pair.page_b.page_index, dpi)
+                img_b = R.apply_transform(img_b_raw, pair.offset_x, pair.offset_y,
+                                           pair.rotation, pair.pivot_x, pair.pivot_y,
+                                           pair.scale_factor, img_a.size)
+
+            if view_mode == 'a':
+                content = R.render_single_colored(img_a, self.overlay_set.color_a)
+            elif view_mode == 'b':
+                content = R.render_single_colored(img_b, self.overlay_set.color_b)
+            else:
+                composite = R.composite_overlay(img_a, img_b,
+                                                 self.overlay_set.color_a,
+                                                 self.overlay_set.color_b,
+                                                 shared_color=self.overlay_set.shared_color)
+                if view_mode == 'mask':
+                    base_color = (self.overlay_set.color_a if pair.mask_base == 'a'
+                                  else self.overlay_set.color_b)
+                    base_src = img_a if pair.mask_base == 'a' else img_b
+                    base_solo = R.render_single_colored(base_src, base_color)
+                    content = R.composite_masked(composite, base_solo, pair.masks,
+                                                  img_a.width, img_a.height)
+                else:
+                    content = composite
 
             # White background for export
-            bg = Image.new("RGBA", composite.size, (255, 255, 255, 255))
-            bg.paste(composite, mask=composite)
+            bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
+            bg.paste(content, mask=content)
             final = bg.convert("RGB")
 
             # Optionally burn in the user's markups at export resolution.

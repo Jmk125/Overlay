@@ -45,6 +45,12 @@ class OverlayPair:
     markups: list = field(default_factory=list)
     notes: str = ""
 
+    # Mask regions for the "Masked Overlay" view: outside the mask(s) shows
+    # `mask_base` ('a' or 'b') alone; inside shows the full A+B overlay.
+    # Each mask: {'points': [[nx,ny],...]}  (closed polygon, normalized 0-1)
+    masks: list = field(default_factory=list)
+    mask_base: str = "a"
+
     def __post_init__(self):
         if not self.pair_id:
             self.pair_id = f"{self.page_a.sheet_number}_{self.page_b.sheet_number}"
