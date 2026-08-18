@@ -31,6 +31,8 @@ def save_project(overlay_set: OverlaySet, filepath: str):
             'scale_b': pair.scale_b,
             'markups': pair.markups,
             'notes': pair.notes,
+            'masks': pair.masks,
+            'mask_base': pair.mask_base,
         }
 
     def workspace_to_dict(d: WorkspaceDrawing):
@@ -111,6 +113,8 @@ def load_project(filepath: str) -> OverlaySet:
             scale_b=pd.get('scale_b', ''),
             markups=pd.get('markups', []) or [],
             notes=pd.get('notes', '') or '',
+            masks=pd.get('masks', []) or [],
+            mask_base=pd.get('mask_base', 'a') or 'a',
         )
         overlay_set.pairs.append(pair)
 

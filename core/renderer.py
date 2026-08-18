@@ -6,7 +6,7 @@ import math
 import os
 import sys
 import numpy as np
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 from PyQt6.QtGui import (
     QImage, QPixmap, QColor, QPainter, QPen, QBrush, QPainterPath
 )
@@ -277,6 +277,57 @@ def render_markups_pil(markups: list, width: int, height: int) -> Image.Image:
     buf = io.BytesIO(bytes(ba))
     buf.seek(0)
     return Image.open(buf).convert("RGBA")
+
+
+# ── Mask rendering (shared by the live canvas preview and export) ──────
+
+def mask_clip_qpath(masks: list, width: float, height: float) -> QPainterPath:
+    """Union of mask polygons as a QPainterPath in canvas pixel coordinates,
+    used to clip the live 'masked overlay' preview to the masked area(s)."""
+    path = QPainterPath()
+    for m in masks:
+        pts = m.get('points', [])
+        if len(pts) < 3:
+            continue
+        sub = QPainterPath()
+        sub.moveTo(pts[0][0] * width, pts[0][1] * height)
+        for p in pts[1:]:
+            sub.lineTo(p[0] * width, p[1] * height)
+        sub.closeSubpath()
+        path = path.united(sub)
+    return path
+
+
+def mask_clip_image(masks: list, width: int, height: int) -> Image.Image:
+    """Build an 'L' mode clip mask: 255 inside the union of mask polygons,
+    0 outside. Points are normalized 0-1 fractions of (width, height)."""
+    img = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(img)
+    for m in masks:
+        pts = m.get('points', [])
+        if len(pts) < 3:
+            continue
+        draw.polygon([(p[0] * width, p[1] * height) for p in pts], fill=255)
+    return img
+
+
+def composite_masked(overlay_img: Image.Image, base_img: Image.Image,
+                     masks: list, width: int, height: int) -> Image.Image:
+    """Show `overlay_img` only inside the mask polygons; `base_img` elsewhere.
+
+    Backs the 'Masked Overlay' view/export: a single drawing shown normally,
+    with the full A+B overlay visible only inside the masked area(s).
+    """
+    if not masks:
+        return base_img.copy()
+    clip = mask_clip_image(masks, width, height)
+    a = overlay_img.convert("RGBA")
+    b = base_img.convert("RGBA")
+    if a.size != (width, height):
+        a = a.resize((width, height))
+    if b.size != (width, height):
+        b = b.resize((width, height))
+    return Image.composite(a, b, clip)
 
 
 def get_page_count(pdf_path: str) -> int:
