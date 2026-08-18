@@ -46,10 +46,13 @@ class OverlayPair:
     notes: str = ""
 
     # Mask regions for the "Masked Overlay" view: outside the mask(s) shows
-    # `mask_base` ('a' or 'b') alone; inside shows the full A+B overlay.
+    # `mask_base` ('a' or 'b') alone; inside shows the full A+B overlay, or —
+    # when `mask_cutout` is on — just the OTHER drawing alone (a punched-hole
+    # reveal instead of an overlay, no blending of the two).
     # Each mask: {'points': [[nx,ny],...]}  (closed polygon, normalized 0-1)
     masks: list = field(default_factory=list)
     mask_base: str = "a"
+    mask_cutout: bool = False
 
     def __post_init__(self):
         if not self.pair_id:
