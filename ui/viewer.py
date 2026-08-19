@@ -169,6 +169,7 @@ class MaskedOverlayItem(QGraphicsItem):
         self._masks = []
         self._pending_points = []
         self._show_outlines = False
+        self._show_content = False
         self._cutout = False
         self._other_pixmap = None
         self._other_transform = QTransform()
@@ -196,6 +197,10 @@ class MaskedOverlayItem(QGraphicsItem):
         self._show_outlines = on
         self.update()
 
+    def set_show_content(self, on: bool):
+        self._show_content = on
+        self.update()
+
     def set_cutout(self, on: bool):
         self._cutout = on
         self.update()
@@ -221,24 +226,29 @@ class MaskedOverlayItem(QGraphicsItem):
         self.update()
 
     def paint(self, painter, option, widget=None):
-        path = R.mask_clip_qpath(self._masks, self._w, self._h)
-        if not path.isEmpty():
-            painter.save()
-            painter.setClipPath(path)   # clip stays fixed in canvas coords
-            if self._cutout:
-                if self._other_pixmap:
-                    # The base layer is painted underneath this item, so a
-                    # blank (no-ink) patch of the "other" drawing would let
-                    # it bleed through here otherwise. Paint the canvas
-                    # background first to fully occlude the base within the
-                    # hole — a real cutout reveals the whole other sheet,
-                    # not just its ink over a see-through gap.
-                    painter.fillRect(self.boundingRect(), self._bg_color)
-                    painter.setTransform(self._other_transform, True)
-                    painter.drawPixmap(0, 0, self._other_pixmap)
-            elif self._composite_pixmap:
-                painter.drawPixmap(0, 0, self._composite_pixmap)
-            painter.restore()
+        # The filled mask content (overlay or cutout reveal) only belongs to
+        # the actual "Masked Overlay" view — never while just drawing/editing
+        # shapes over a different view (see set_show_outlines below, which
+        # covers that case independently).
+        if self._show_content:
+            path = R.mask_clip_qpath(self._masks, self._w, self._h)
+            if not path.isEmpty():
+                painter.save()
+                painter.setClipPath(path)   # clip stays fixed in canvas coords
+                if self._cutout:
+                    if self._other_pixmap:
+                        # The base layer is painted underneath this item, so a
+                        # blank (no-ink) patch of the "other" drawing would let
+                        # it bleed through here otherwise. Paint the canvas
+                        # background first to fully occlude the base within the
+                        # hole — a real cutout reveals the whole other sheet,
+                        # not just its ink over a see-through gap.
+                        painter.fillRect(self.boundingRect(), self._bg_color)
+                        painter.setTransform(self._other_transform, True)
+                        painter.drawPixmap(0, 0, self._other_pixmap)
+                elif self._composite_pixmap:
+                    painter.drawPixmap(0, 0, self._composite_pixmap)
+                painter.restore()
 
         # The mask being reshaped in Edit mode always shows its handles,
         # regardless of whether outline previews are otherwise on.
@@ -294,6 +304,7 @@ class OverlayCanvas(QGraphicsView):
     pair_preview = pyqtSignal()    # live change during a drag -> no recompute
     markups_changed = pyqtSignal() # a markup was added / removed
     masks_changed = pyqtSignal()   # a mask was added / removed
+    mode_changed = pyqtSignal(int) # the interaction mode changed (incl. via keyboard)
 
     MODE_VIEW = 0
     MODE_MOVE = 1
@@ -430,6 +441,7 @@ class OverlayCanvas(QGraphicsView):
         # only happens while you actually drag (see mousePressEvent). When idle
         # the canvas stays flattened to the composite.
         self._update_visibility()
+        self.mode_changed.emit(mode)
 
     def start_mask_edit(self, index: int):
         """Enter Edit mode for one mask: drag its vertices to reshape it, or
@@ -669,11 +681,16 @@ class OverlayCanvas(QGraphicsView):
             # Make B translucent while aligning so overlaps are visible.
             self._item_b.setOpacity(0.6 if live else 1.0)
         if self._mask_item:
-            # Masks only ever show in the "Masked Overlay" view — never bleed
-            # into Overlay/A-only/B-only.
-            self._mask_item.setVisible(mask_mode)
-            self._mask_item.set_show_outlines(
-                mask_mode and self._mode in (self.MODE_MASK, self.MODE_MASK_EDIT))
+            # The filled mask CONTENT only ever shows in the "Masked Overlay"
+            # view — never bleeds into Overlay/A-only/B-only. But the drawing
+            # aids (dots, pending line, existing outlines, edit handles) stay
+            # visible while actively drawing/editing regardless of which view
+            # is selected, so you can draw or reshape a mask while referencing
+            # a specific drawing.
+            drawing = self._mode in (self.MODE_MASK, self.MODE_MASK_EDIT)
+            self._mask_item.setVisible(mask_mode or drawing)
+            self._mask_item.set_show_content(mask_mode)
+            self._mask_item.set_show_outlines(drawing)
 
     def refresh_mask_view(self):
         """Re-evaluate visibility and the cutout layer after `pair.mask_base`
@@ -940,6 +957,27 @@ class OverlayCanvas(QGraphicsView):
             self._mask_item.set_masks(self._pair.masks)
         self.masks_changed.emit()
 
+    def mask_duplicate(self, index: int):
+        """Insert a copy of one mask right after it, nudged slightly so the
+        two don't sit exactly on top of each other."""
+        if not (self._pair and 0 <= index < len(self._pair.masks)):
+            return
+        src = self._pair.masks[index]
+        nudge = 0.02
+        copy = {
+            'points': [[min(1.0, max(0.0, p[0] + nudge)),
+                       min(1.0, max(0.0, p[1] + nudge))] for p in src.get('points', [])],
+            'visible': src.get('visible', True),
+            'color': src.get('color'),
+            'name': f"{src.get('name') or f'Mask {index + 1}'} copy",
+        }
+        self._pair.masks.insert(index + 1, copy)
+        if self._mask_edit_index is not None and index < self._mask_edit_index:
+            self._mask_edit_index += 1   # keep pointing at the same mask
+        if self._mask_item:
+            self._mask_item.set_masks(self._pair.masks)
+        self.masks_changed.emit()
+
     def mask_clear(self):
         if self._pair and self._pair.masks:
             self._pair.masks.clear()
@@ -1052,6 +1090,7 @@ class OverlayViewer(QWidget):
         self.canvas.pair_changed.connect(self._on_pair_changed)
         self.canvas.pair_preview.connect(self._on_pair_preview)
         self.canvas.masks_changed.connect(self._on_canvas_masks_changed)
+        self.canvas.mode_changed.connect(self._on_canvas_mode_changed)
         center_layout.addWidget(self.canvas, 1)
 
         self.progress = QProgressBar()
@@ -1544,6 +1583,13 @@ class OverlayViewer(QWidget):
             edit_btn.clicked.connect(lambda _, idx=i: self._toggle_mask_edit(idx))
             row_layout.addWidget(edit_btn)
 
+            dup_btn = QPushButton("⧉")
+            dup_btn.setToolTip("Duplicate this mask")
+            dup_btn.setFixedSize(24, 22)
+            dup_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; border-radius:3px;")
+            dup_btn.clicked.connect(lambda _, idx=i: self.canvas.mask_duplicate(idx))
+            row_layout.addWidget(dup_btn)
+
             del_btn = QPushButton("🗑")
             del_btn.setToolTip("Delete this mask")
             del_btn.setFixedSize(24, 22)
@@ -1567,15 +1613,25 @@ class OverlayViewer(QWidget):
             pair.masks[index]['name'] = text
 
     def _toggle_mask_edit(self, index: int):
-        self.draw_mask_btn.setChecked(False)
         if self.canvas._mask_edit_index == index:
             self.canvas.stop_mask_edit()
         else:
             self.canvas.start_mask_edit(index)
-        self._refresh_mask_list()
+        # mode_changed (emitted by set_mode above) already resyncs the UI.
 
     def _on_canvas_masks_changed(self):
-        self.draw_mask_btn.setChecked(False)
+        self._sync_mask_ui()
+
+    def _on_canvas_mode_changed(self, mode: int):
+        self._sync_mask_ui()
+
+    def _sync_mask_ui(self):
+        """Single place that keeps the Masks panel in sync with the canvas:
+        the Draw Mask toggle, the panel's own visibility (stays up while
+        actively drawing/editing even off the Masked Overlay view), and the
+        per-mask list (names/order/edit-highlight)."""
+        self.draw_mask_btn.setChecked(self.canvas._mode == OverlayCanvas.MODE_MASK)
+        self._sync_mask_section_visibility()
         self._refresh_mask_list()
 
     def _current_pair(self) -> OverlayPair:
@@ -1793,7 +1849,15 @@ class OverlayViewer(QWidget):
         for k, btn in self.view_btns.items():
             btn.setChecked(k == mode)
         self.canvas.set_view_mode(mode)
-        self.mask_section.setVisible(mode == 'mask')
+        self._sync_mask_section_visibility()
+
+    def _sync_mask_section_visibility(self):
+        """Keep the Masks panel reachable while actively drawing/editing a
+        mask even if you switch to another view to reference a drawing —
+        only hide it once nothing is active and you're not in the Masked
+        Overlay view."""
+        drawing = self.canvas._mode in (OverlayCanvas.MODE_MASK, OverlayCanvas.MODE_MASK_EDIT)
+        self.mask_section.setVisible(self._current_view_mode() == 'mask' or drawing)
 
     def _set_align_mode(self, mode: str):
         if mode == 'move':
@@ -1809,21 +1873,19 @@ class OverlayViewer(QWidget):
             self.move_btn.setChecked(False)
             self.rotate_btn.setChecked(False)
         # Leaving markup/mask mode — clear their tool buttons.
+        # (canvas.set_mode above emits mode_changed, which resyncs the Masks
+        # panel: Draw Mask toggle, panel visibility, edit-highlight.)
         for b in self.markup_btns.values():
             b.setChecked(False)
-        self.draw_mask_btn.setChecked(False)
-        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _set_markup_tool(self, tool: str):
         self.canvas.set_markup_tool(tool)
         self.canvas.set_mode(OverlayCanvas.MODE_MARKUP)
         for k, b in self.markup_btns.items():
             b.setChecked(k == tool)
-        # Markup mode is exclusive with the align and mask tools.
+        # Markup mode is exclusive with the align tool.
         self.move_btn.setChecked(False)
         self.rotate_btn.setChecked(False)
-        self.draw_mask_btn.setChecked(False)
-        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _toggle_mask_draw(self):
         if self.draw_mask_btn.isChecked():
@@ -1835,7 +1897,6 @@ class OverlayViewer(QWidget):
                 b.setChecked(False)
         else:
             self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
-        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _set_mask_base(self, which: str):
         pair = self._current_pair()
