@@ -241,6 +241,8 @@ def paint_markups(painter: QPainter, markups: list, width: int, height: int):
     """Draw a list of normalized markups onto a QPainter sized width×height."""
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     for m in markups:
+        if not m.get('visible', True):
+            continue
         pts = [(p[0] * width, p[1] * height) for p in m.get('points', [])]
         if len(pts) < 2:
             continue

@@ -105,6 +105,8 @@ class MarkupOverlayItem(QGraphicsItem):
         self._markups = []
         self._pending = None
         self._selected = None   # index of selected markup, or None
+        self._edit_index = None
+        self._edit_selected_vertex = None
         self.setZValue(1000)   # always above the drawings
 
     def boundingRect(self) -> QRectF:
@@ -120,6 +122,14 @@ class MarkupOverlayItem(QGraphicsItem):
 
     def set_selected(self, idx):
         self._selected = idx
+        self.update()
+
+    def set_edit_index(self, index):
+        self._edit_index = index
+        self.update()
+
+    def set_edit_selected_vertex(self, index):
+        self._edit_selected_vertex = index
         self.update()
 
     def paint(self, painter, option, widget=None):
@@ -150,6 +160,24 @@ class MarkupOverlayItem(QGraphicsItem):
                 for hx, hy in [(rect.left(), rect.top()), (rect.right(), rect.top()),
                                (rect.left(), rect.bottom()), (rect.right(), rect.bottom())]:
                     painter.drawRect(QRectF(hx - 3, hy - 3, 6, 6))
+
+        # The markup being reshaped in Edit mode shows its actual vertices as
+        # draggable handles, regardless of its own visibility.
+        if self._edit_index is not None and 0 <= self._edit_index < len(self._markups):
+            pts = self._markups[self._edit_index].get('points', [])
+            spts = [QPointF(p[0] * self._w, p[1] * self._h) for p in pts]
+            if len(spts) >= 2:
+                epen = QPen(QColor('#00e0ff'))
+                epen.setWidthF(2)
+                epen.setCosmetic(True)
+                painter.setPen(epen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolyline(QPolygonF(spts))
+                painter.setPen(Qt.PenStyle.NoPen)
+                for i, p in enumerate(spts):
+                    painter.setBrush(QColor('#ffdd00') if i == self._edit_selected_vertex
+                                     else QColor('#00e0ff'))
+                    painter.drawEllipse(p, 5, 5)
 
 
 class MaskedOverlayItem(QGraphicsItem):
@@ -353,6 +381,7 @@ class OverlayCanvas(QGraphicsView):
     MODE_MARKUP = 3
     MODE_MASK = 4
     MODE_MASK_EDIT = 5
+    MODE_MARKUP_EDIT = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -397,6 +426,9 @@ class OverlayCanvas(QGraphicsView):
         self._select_dragging = False
         self._select_last = None
         self._polyline_points = []        # in-progress polyline markup, normalized 0-1
+        self._markup_edit_index = None    # index of the markup being reshaped
+        self._markup_edit_selected = None # index of its selected vertex
+        self._markup_edit_drag = None     # ('vertex', idx) or ('shape', last_scene_pos)
 
         # Masks (windowed overlay)
         self._mask_item = None
@@ -469,6 +501,13 @@ class OverlayCanvas(QGraphicsView):
             if self._mask_item:
                 self._mask_item.set_edit_index(None)
                 self._mask_item.set_edit_selected_vertex(None)
+        if self._mode == self.MODE_MARKUP_EDIT and mode != self.MODE_MARKUP_EDIT:
+            self._markup_edit_index = None
+            self._markup_edit_selected = None
+            self._markup_edit_drag = None
+            if self._markup_item:
+                self._markup_item.set_edit_index(None)
+                self._markup_item.set_edit_selected_vertex(None)
         self._mode = mode
         if mode == self.MODE_VIEW:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
@@ -481,6 +520,8 @@ class OverlayCanvas(QGraphicsView):
         elif mode == self.MODE_MASK:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         elif mode == self.MODE_MASK_EDIT:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        elif mode == self.MODE_MARKUP_EDIT:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         # Selecting a tool does NOT switch to the live colored preview — that
         # only happens while you actually drag (see mousePressEvent). When idle
@@ -501,6 +542,19 @@ class OverlayCanvas(QGraphicsView):
     def stop_mask_edit(self):
         self.set_mode(self.MODE_VIEW)
 
+    def start_markup_edit(self, index: int):
+        """Enter Edit mode for one markup: drag its vertices to reshape it,
+        or drag its body to move the whole thing."""
+        if not self._pair or not (0 <= index < len(self._pair.markups)):
+            return
+        self._markup_edit_index = index
+        self.set_mode(self.MODE_MARKUP_EDIT)
+        if self._markup_item:
+            self._markup_item.set_edit_index(index)
+
+    def stop_markup_edit(self):
+        self.set_mode(self.MODE_VIEW)
+
     def load_pixmaps(self, pix_a, pix_b, pix_composite, pair: OverlayPair,
                      reset_view: bool = False):
         self._pix_a = pix_a
@@ -514,10 +568,13 @@ class OverlayCanvas(QGraphicsView):
         # they're recreated below (_apply_b_transform syncs the mask layer).
         self._mask_item = None
         self._markup_item = None
-        # A fresh pair (or re-render) invalidates any in-progress mask edit.
+        # A fresh pair (or re-render) invalidates any in-progress mask/markup edit.
         self._mask_edit_index = None
         self._mask_edit_selected = None
         self._mask_edit_drag = None
+        self._markup_edit_index = None
+        self._markup_edit_selected = None
+        self._markup_edit_drag = None
         self._item_a = self.gscene.addPixmap(pix_a if pix_a else QPixmap())
         self._item_b = self.gscene.addPixmap(pix_b if pix_b else QPixmap())
         self._item_composite = self.gscene.addPixmap(pix_composite if pix_composite else QPixmap())
@@ -570,6 +627,8 @@ class OverlayCanvas(QGraphicsView):
                 'points': [list(p) for p in self._polyline_points],
                 'color': self._markup_color,
                 'width': self._markup_width,
+                'visible': True,
+                'name': self._next_markup_name('polyline'),
             }
             self._pair.markups.append(markup)
             if self._markup_item:
@@ -582,6 +641,13 @@ class OverlayCanvas(QGraphicsView):
         self._pending_markup = None
         if self._markup_item:
             self._markup_item.set_pending(None)
+
+    _MARKUP_TYPE_LABELS = {'line': 'Line', 'polyline': 'Polyline', 'rect': 'Box', 'cloud': 'Cloud'}
+
+    def _next_markup_name(self, mtype: str) -> str:
+        label = self._MARKUP_TYPE_LABELS.get(mtype, mtype.capitalize() if mtype else 'Markup')
+        n = (len(self._pair.markups) + 1) if self._pair else 1
+        return f"{label} {n}"
 
     def set_markup_color(self, hex_color: str):
         self._markup_color = hex_color
@@ -634,30 +700,159 @@ class OverlayCanvas(QGraphicsView):
                     return i
         return None
 
+    def _markup_edit_hit_vertex(self, scene_pos):
+        """Index of the vertex of the markup being edited near scene_pos, or None."""
+        if self._markup_edit_index is None or not self._pair:
+            return None
+        if not (0 <= self._markup_edit_index < len(self._pair.markups)):
+            return None
+        pts = self._pair.markups[self._markup_edit_index].get('points', [])
+        W, H = self._canvas_w, self._canvas_h
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale
+        px, py = scene_pos.x(), scene_pos.y()
+        for i in range(len(pts) - 1, -1, -1):
+            x, y = pts[i][0] * W, pts[i][1] * H
+            if math.hypot(px - x, py - y) <= tol:
+                return i
+        return None
+
+    def _markup_edit_hit_edge(self, scene_pos):
+        """Index to insert a new vertex at if scene_pos is near one of the
+        editing markup's segments, else None. Only meaningful for line/
+        polyline — rect/cloud are always exactly two opposite corners, and
+        inserting a third point would break how they're drawn."""
+        if self._markup_edit_index is None or not self._pair:
+            return None
+        if not (0 <= self._markup_edit_index < len(self._pair.markups)):
+            return None
+        m = self._pair.markups[self._markup_edit_index]
+        if m.get('type') not in ('line', 'polyline'):
+            return None
+        pts = m.get('points', [])
+        n = len(pts)
+        if n < 2:
+            return None
+        W, H = self._canvas_w, self._canvas_h
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale
+        px, py = scene_pos.x(), scene_pos.y()
+        for i in range(n - 1):
+            x0, y0 = pts[i][0] * W, pts[i][1] * H
+            x1, y1 = pts[i + 1][0] * W, pts[i + 1][1] * H
+            if self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol:
+                return i + 1
+        return None
+
+    def _markup_edit_hit_body(self, scene_pos) -> bool:
+        """True if scene_pos is on/inside the markup currently being edited —
+        used to start a whole-shape drag."""
+        if self._markup_edit_index is None or not self._pair:
+            return False
+        if not (0 <= self._markup_edit_index < len(self._pair.markups)):
+            return False
+        m = self._pair.markups[self._markup_edit_index]
+        pts = [(p[0] * self._canvas_w, p[1] * self._canvas_h) for p in m.get('points', [])]
+        if len(pts) < 2:
+            return False
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale
+        px, py = scene_pos.x(), scene_pos.y()
+        if m.get('type') in ('line', 'polyline'):
+            return any(self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol
+                      for (x0, y0), (x1, y1) in zip(pts, pts[1:]))
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return min(xs) - tol <= px <= max(xs) + tol and min(ys) - tol <= py <= max(ys) + tol
+
+    def _markup_edit_select_vertex(self, idx):
+        self._markup_edit_selected = idx
+        if self._markup_item:
+            self._markup_item.set_edit_selected_vertex(idx)
+
+    def _markup_edit_insert_vertex(self, insert_idx: int, scene_pos):
+        pts = self._pair.markups[self._markup_edit_index]['points']
+        pts.insert(insert_idx, self._scene_to_norm(scene_pos))
+        self._markup_edit_select_vertex(insert_idx)
+        if self._markup_item:
+            self._markup_item.set_markups(self._pair.markups)
+
+    def _markup_edit_delete_selected_vertex(self):
+        if self._markup_edit_index is None or not self._pair:
+            return
+        pts = self._pair.markups[self._markup_edit_index].get('points', [])
+        idx = self._markup_edit_selected
+        if idx is None or not (0 <= idx < len(pts)) or len(pts) <= 2:
+            return
+        del pts[idx]
+        self._markup_edit_select_vertex(None)
+        if self._markup_item:
+            self._markup_item.set_markups(self._pair.markups)
+
     def markup_delete_selected(self):
         if (self._pair and self._selected_markup is not None
                 and 0 <= self._selected_markup < len(self._pair.markups)):
-            del self._pair.markups[self._selected_markup]
-            self._select_markup(None)
-            if self._markup_item:
-                self._markup_item.set_markups(self._pair.markups)
-            self.markups_changed.emit()
+            self.markup_remove_at(self._selected_markup)
 
     def markup_undo(self):
         if self._pair and self._pair.markups:
-            self._pair.markups.pop()
-            self._select_markup(None)
-            if self._markup_item:
-                self._markup_item.set_markups(self._pair.markups)
-            self.markups_changed.emit()
+            self.markup_remove_at(len(self._pair.markups) - 1)
 
     def markup_clear(self):
         if self._pair and self._pair.markups:
             self._pair.markups.clear()
             self._select_markup(None)
+            self.set_mode(self.MODE_VIEW)   # drop any in-progress draw/edit
             if self._markup_item:
                 self._markup_item.set_markups(self._pair.markups)
             self.markups_changed.emit()
+
+    def markup_remove_at(self, index: int):
+        if not (self._pair and 0 <= index < len(self._pair.markups)):
+            return
+        if self._markup_edit_index == index:
+            self.set_mode(self.MODE_VIEW)   # was being edited — stop first
+        elif self._markup_edit_index is not None and index < self._markup_edit_index:
+            self._markup_edit_index -= 1    # keep pointing at the same markup
+        if self._selected_markup == index:
+            self._select_markup(None)
+        elif self._selected_markup is not None and index < self._selected_markup:
+            self._selected_markup -= 1
+        del self._pair.markups[index]
+        if self._markup_item:
+            self._markup_item.set_markups(self._pair.markups)
+        self.markups_changed.emit()
+
+    def markup_duplicate(self, index: int):
+        """Insert a copy of one markup right after it, nudged slightly so the
+        two don't sit exactly on top of each other."""
+        if not (self._pair and 0 <= index < len(self._pair.markups)):
+            return
+        src = self._pair.markups[index]
+        nudge = 0.02
+        copy = {
+            'type': src.get('type', 'line'),
+            'points': [[min(1.0, max(0.0, p[0] + nudge)),
+                       min(1.0, max(0.0, p[1] + nudge))] for p in src.get('points', [])],
+            'color': src.get('color', '#ff3030'),
+            'width': src.get('width', 0.003),
+            'visible': src.get('visible', True),
+            'name': f"{src.get('name') or self._next_markup_name(src.get('type'))} copy",
+        }
+        self._pair.markups.insert(index + 1, copy)
+        if self._markup_edit_index is not None and index < self._markup_edit_index:
+            self._markup_edit_index += 1
+        if self._selected_markup is not None and index < self._selected_markup:
+            self._selected_markup += 1
+        if self._markup_item:
+            self._markup_item.set_markups(self._pair.markups)
+        self.markups_changed.emit()
+
+    def markups_updated(self):
+        """Refresh after directly mutating pair.markups in place (a
+        visibility toggle, rename, or color change from the Markups list)."""
+        if self._markup_item and self._pair:
+            self._markup_item.set_markups(self._pair.markups)
 
     def keyPressEvent(self, event):
         if (self._mode == self.MODE_MARKUP and self._selected_markup is not None
@@ -697,6 +892,14 @@ class OverlayCanvas(QGraphicsView):
             if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
                     and self._mask_edit_selected is not None):
                 self._mask_edit_delete_selected_vertex()
+                return
+        if self._mode == self.MODE_MARKUP_EDIT:
+            if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.stop_markup_edit()
+                return
+            if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                    and self._markup_edit_selected is not None):
+                self._markup_edit_delete_selected_vertex()
                 return
         super().keyPressEvent(event)
 
@@ -799,7 +1002,7 @@ class OverlayCanvas(QGraphicsView):
         uses the left drag (align, markup or mask) is active."""
         return (self._pan_button == Qt.MouseButton.LeftButton
                 and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP,
-                                   self.MODE_MASK, self.MODE_MASK_EDIT))
+                                   self.MODE_MASK, self.MODE_MASK_EDIT, self.MODE_MARKUP_EDIT))
 
     def _mask_edit_hit_vertex(self, scene_pos):
         """Index of the vertex of the mask being edited near scene_pos, or None."""
@@ -908,6 +1111,8 @@ class OverlayCanvas(QGraphicsView):
                     'points': [start, list(start)],
                     'color': self._markup_color,
                     'width': self._markup_width,
+                    'visible': True,
+                    'name': self._next_markup_name(self._markup_tool),
                 }
                 self._markup_item.set_pending(self._pending_markup)
                 return
@@ -927,6 +1132,18 @@ class OverlayCanvas(QGraphicsView):
                     self._mask_edit_select_vertex(None)
                 else:
                     self._mask_edit_drag = None
+                return
+            if self._mode == self.MODE_MARKUP_EDIT:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                vidx = self._markup_edit_hit_vertex(scene_pt)
+                if vidx is not None:
+                    self._markup_edit_drag = ('vertex', vidx)
+                    self._markup_edit_select_vertex(vidx)
+                elif self._markup_edit_hit_body(scene_pt):
+                    self._markup_edit_drag = ('shape', scene_pt)
+                    self._markup_edit_select_vertex(None)
+                else:
+                    self._markup_edit_drag = None
                 return
             if self._mode in (self.MODE_MOVE, self.MODE_ROTATE):
                 self._drag_start = self.mapToScene(event.position().toPoint())
@@ -979,6 +1196,23 @@ class OverlayCanvas(QGraphicsView):
                 self._mask_item.set_masks(self._pair.masks)
             return
 
+        if self._markup_edit_drag is not None and self._pair is not None:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            kind, payload = self._markup_edit_drag
+            pts = self._pair.markups[self._markup_edit_index]['points']
+            if kind == 'vertex':
+                pts[payload] = self._scene_to_norm(scene_pt)
+            else:   # 'shape' — payload is the last scene position
+                dx = (scene_pt.x() - payload.x()) / self._canvas_w
+                dy = (scene_pt.y() - payload.y()) / self._canvas_h
+                for p in pts:
+                    p[0] += dx
+                    p[1] += dy
+                self._markup_edit_drag = ('shape', scene_pt)
+            if self._markup_item:
+                self._markup_item.set_markups(self._pair.markups)
+            return
+
         if event.buttons() & Qt.MouseButton.LeftButton and self._pair:
             fine = event.modifiers() & Qt.KeyboardModifier.ShiftModifier
             factor = 0.1 if fine else 1.0
@@ -1021,6 +1255,9 @@ class OverlayCanvas(QGraphicsView):
         if self._mask_edit_drag is not None and event.button() == Qt.MouseButton.LeftButton:
             self._mask_edit_drag = None
             return
+        if self._markup_edit_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._markup_edit_drag = None
+            return
         if self._select_dragging and event.button() == Qt.MouseButton.LeftButton:
             self._select_dragging = False
             self.markups_changed.emit()   # committed move
@@ -1060,6 +1297,12 @@ class OverlayCanvas(QGraphicsView):
         if (self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline'
                 and event.button() == Qt.MouseButton.LeftButton):
             self._finish_polyline_markup()
+            return
+        if self._mode == self.MODE_MARKUP_EDIT and event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            insert_idx = self._markup_edit_hit_edge(scene_pt)
+            if insert_idx is not None:
+                self._markup_edit_insert_vertex(insert_idx, scene_pt)
             return
         super().mouseDoubleClickEvent(event)
 
@@ -1228,6 +1471,7 @@ class OverlayViewer(QWidget):
         self.canvas.pair_changed.connect(self._on_pair_changed)
         self.canvas.pair_preview.connect(self._on_pair_preview)
         self.canvas.masks_changed.connect(self._on_canvas_masks_changed)
+        self.canvas.markups_changed.connect(self._on_canvas_markups_changed)
         self.canvas.mode_changed.connect(self._on_canvas_mode_changed)
         center_layout.addWidget(self.canvas, 1)
 
@@ -1500,27 +1744,27 @@ class OverlayViewer(QWidget):
         cw_row.addStretch()
         markup_section.addLayout(cw_row)
 
-        uc_row = QHBoxLayout()
-        undo_btn = QPushButton("↶ Undo")
-        undo_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
-        undo_btn.clicked.connect(self.canvas.markup_undo)
-        del_btn = QPushButton("🗑 Delete")
-        del_btn.setToolTip("Delete the selected markup (or press Delete)")
-        del_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
-        del_btn.clicked.connect(self.canvas.markup_delete_selected)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
-        clear_btn.clicked.connect(self.canvas.markup_clear)
-        uc_row.addWidget(undo_btn)
-        uc_row.addWidget(del_btn)
-        uc_row.addWidget(clear_btn)
-        markup_section.addLayout(uc_row)
+        markup_section.addWidget(QLabel(
+            "Markups (check to show/hide, type to rename, ✎ to reshape):",
+            wordWrap=True, styleSheet="color:#888; font-size:9px;"))
+        self.markup_list = QListWidget()
+        self.markup_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
+        self.markup_list.setFixedHeight(130)
+        markup_section.addWidget(self.markup_list)
+
+        clear_markups_btn = QPushButton("Clear All Markups")
+        clear_markups_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
+        clear_markups_btn.clicked.connect(self.canvas.markup_clear)
+        markup_section.addWidget(clear_markups_btn)
 
         markup_section.addWidget(QLabel(
             "Line/Box/Cloud: drag on the drawing. Polyline: click to add each "
             "point, double-click or Enter to finish (doesn't need to close); "
             "Esc cancels, Backspace undoes the last point. Select: click a "
-            "markup to move it; Delete removes it. Pan with right-drag.",
+            "markup to move it, Delete removes it. Edit (✎): drag a point to "
+            "reshape, double-click a line to add a point there, drag inside "
+            "to move the whole markup, Delete removes the selected point, "
+            "Esc/Enter finishes. Pan with right-drag.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
@@ -1689,6 +1933,7 @@ class OverlayViewer(QWidget):
         self.mask_cutout_chk.setChecked(pair.mask_cutout)
         self.mask_cutout_chk.blockSignals(False)
         self._refresh_mask_list()
+        self._refresh_markup_list()
 
     # ── Masks list (show/hide, rename, edit-shape and delete each mask) ──
     def _refresh_mask_list(self):
@@ -1795,11 +2040,105 @@ class OverlayViewer(QWidget):
             self.canvas.start_mask_edit(index)
         # mode_changed (emitted by set_mode above) already resyncs the UI.
 
+    # ── Markups list (show/hide, rename, recolor, edit-shape, duplicate,
+    #    delete each markup) ────────────────────────────────────────
+    def _refresh_markup_list(self):
+        pair = self._current_pair()
+        editing = self.canvas._markup_edit_index
+        self.markup_list.clear()
+        for i, m in enumerate(pair.markups):
+            item = QListWidgetItem()
+            self.markup_list.addItem(item)
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(4)
+
+            chk = QCheckBox()
+            chk.setChecked(m.get('visible', True))
+            chk.toggled.connect(lambda checked, idx=i: self._on_markup_visible_toggled(idx, checked))
+            row_layout.addWidget(chk)
+
+            name_edit = QLineEdit(m.get('name') or self.canvas._next_markup_name(m.get('type')))
+            name_edit.setStyleSheet("background:#2a2a2a; color:#ddd; border:1px solid #444; padding:2px;")
+            name_edit.editingFinished.connect(
+                lambda idx=i, w=name_edit: self._on_markup_renamed(idx, w.text()))
+            row_layout.addWidget(name_edit, 1)
+
+            color_btn = QPushButton()
+            color_btn.setFixedSize(20, 22)
+            color_btn.setToolTip("Markup color")
+            color_btn.setStyleSheet(
+                f"background:{m.get('color', '#ff3030')}; border:1px solid #777; border-radius:3px;")
+            color_btn.clicked.connect(lambda _, idx=i: self._pick_markup_row_color(idx))
+            row_layout.addWidget(color_btn)
+
+            edit_btn = QPushButton("✎")
+            edit_btn.setToolTip("Edit shape")
+            edit_btn.setFixedSize(24, 22)
+            edit_btn.setCheckable(True)
+            edit_btn.setChecked(editing == i)
+            edit_btn.setStyleSheet(self._toggle_btn_style())
+            edit_btn.clicked.connect(lambda _, idx=i: self._toggle_markup_edit(idx))
+            row_layout.addWidget(edit_btn)
+
+            dup_btn = QPushButton("⧉")
+            dup_btn.setToolTip("Duplicate this markup")
+            dup_btn.setFixedSize(24, 22)
+            dup_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; border-radius:3px;")
+            dup_btn.clicked.connect(lambda _, idx=i: self.canvas.markup_duplicate(idx))
+            row_layout.addWidget(dup_btn)
+
+            del_btn = QPushButton("🗑")
+            del_btn.setToolTip("Delete this markup")
+            del_btn.setFixedSize(24, 22)
+            del_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; border-radius:3px;")
+            del_btn.clicked.connect(lambda _, idx=i: self.canvas.markup_remove_at(idx))
+            row_layout.addWidget(del_btn)
+
+            item.setSizeHint(row.sizeHint())
+            self.markup_list.setItemWidget(item, row)
+
+    def _on_markup_visible_toggled(self, index: int, checked: bool):
+        pair = self._current_pair()
+        if 0 <= index < len(pair.markups):
+            pair.markups[index]['visible'] = checked
+            self.canvas.markups_updated()
+
+    def _on_markup_renamed(self, index: int, text: str):
+        pair = self._current_pair()
+        text = text.strip()
+        if 0 <= index < len(pair.markups) and text:
+            pair.markups[index]['name'] = text
+
+    def _pick_markup_row_color(self, index: int):
+        pair = self._current_pair()
+        if not (0 <= index < len(pair.markups)):
+            return
+        current = pair.markups[index].get('color', '#ff3030')
+        c = QColorDialog.getColor(QColor(current), self, "Markup Color")
+        if c.isValid():
+            pair.markups[index]['color'] = c.name()
+            self.canvas.markups_updated()
+            self._refresh_markup_list()
+
+    def _toggle_markup_edit(self, index: int):
+        if self.canvas._markup_edit_index == index:
+            self.canvas.stop_markup_edit()
+        else:
+            self.canvas.start_markup_edit(index)
+        # mode_changed (emitted by set_mode above) already resyncs the UI.
+
     def _on_canvas_masks_changed(self):
         self._sync_mask_ui()
 
+    def _on_canvas_markups_changed(self):
+        self._sync_markup_ui()
+
     def _on_canvas_mode_changed(self, mode: int):
         self._sync_mask_ui()
+        self._sync_markup_ui()
 
     def _sync_mask_ui(self):
         """Single place that keeps the Masks panel in sync with the canvas:
@@ -1809,6 +2148,17 @@ class OverlayViewer(QWidget):
         self.draw_mask_btn.setChecked(self.canvas._mode == OverlayCanvas.MODE_MASK)
         self._sync_mask_section_visibility()
         self._refresh_mask_list()
+
+    def _sync_markup_ui(self):
+        """Single place that keeps the Markups panel in sync with the canvas:
+        the draw-tool buttons (only one of select/line/polyline/rect/cloud
+        reflects the active tool, none while editing) and the per-markup
+        list (names/order/edit-highlight)."""
+        active_tool = (self.canvas._markup_tool
+                      if self.canvas._mode == OverlayCanvas.MODE_MARKUP else None)
+        for k, b in self.markup_btns.items():
+            b.setChecked(k == active_tool)
+        self._refresh_markup_list()
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
