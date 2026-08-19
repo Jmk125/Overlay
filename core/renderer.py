@@ -253,6 +253,12 @@ def paint_markups(painter: QPainter, markups: list, width: int, height: int):
         mtype = m.get('type', 'line')
         if mtype == 'line':
             painter.drawLine(QPointF(*pts[0]), QPointF(*pts[1]))
+        elif mtype == 'polyline':
+            path = QPainterPath()
+            path.moveTo(*pts[0])
+            for p in pts[1:]:
+                path.lineTo(*p)
+            painter.drawPath(path)
         elif mtype == 'rect':
             painter.drawRect(QRectF(QPointF(*pts[0]), QPointF(*pts[1])).normalized())
         elif mtype == 'cloud':

@@ -389,13 +389,14 @@ class OverlayCanvas(QGraphicsView):
         self._markup_item = None
         self._canvas_w = 1.0
         self._canvas_h = 1.0
-        self._markup_tool = 'line'        # 'select' | 'line' | 'rect' | 'cloud'
+        self._markup_tool = 'line'        # 'select' | 'line' | 'polyline' | 'rect' | 'cloud'
         self._markup_color = '#ff3030'
         self._markup_width = 0.003        # normalized fraction of canvas width
         self._pending_markup = None
         self._selected_markup = None      # index of selected markup
         self._select_dragging = False
         self._select_last = None
+        self._polyline_points = []        # in-progress polyline markup, normalized 0-1
 
         # Masks (windowed overlay)
         self._mask_item = None
@@ -456,6 +457,9 @@ class OverlayCanvas(QGraphicsView):
             self.gscene.update()
 
     def set_mode(self, mode: int):
+        if (self._mode == self.MODE_MARKUP and mode != self.MODE_MARKUP
+                and self._markup_tool == 'polyline'):
+            self._cancel_polyline_markup()
         if self._mode == self.MODE_MASK and mode != self.MODE_MASK:
             self.mask_cancel_pending()
         if self._mode == self.MODE_MASK_EDIT and mode != self.MODE_MASK_EDIT:
@@ -551,9 +555,33 @@ class OverlayCanvas(QGraphicsView):
 
     # ── Markups ───────────────────────────────────────────────────
     def set_markup_tool(self, tool: str):
+        if self._markup_tool == 'polyline' and tool != 'polyline':
+            self._cancel_polyline_markup()
         self._markup_tool = tool
         if tool != 'select':
             self._select_markup(None)
+
+    def _finish_polyline_markup(self):
+        """Close the in-progress polyline (needs >= 2 points) into a new
+        markup, then stop — a fresh click starts a separate one."""
+        if self._pair is not None and len(self._polyline_points) >= 2:
+            markup = {
+                'type': 'polyline',
+                'points': [list(p) for p in self._polyline_points],
+                'color': self._markup_color,
+                'width': self._markup_width,
+            }
+            self._pair.markups.append(markup)
+            if self._markup_item:
+                self._markup_item.set_markups(self._pair.markups)
+            self.markups_changed.emit()
+        self._cancel_polyline_markup()
+
+    def _cancel_polyline_markup(self):
+        self._polyline_points = []
+        self._pending_markup = None
+        if self._markup_item:
+            self._markup_item.set_pending(None)
 
     def set_markup_color(self, hex_color: str):
         self._markup_color = hex_color
@@ -591,11 +619,15 @@ class OverlayCanvas(QGraphicsView):
             pts = [(p[0] * W, p[1] * H) for p in m.get('points', [])]
             if len(pts) < 2:
                 continue
-            (x0, y0), (x1, y1) = pts[0], pts[1]
-            if m.get('type') == 'line':
-                if self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol:
+            mtype = m.get('type')
+            if mtype in ('line', 'polyline'):
+                # Check every segment, not just the first — a polyline can
+                # have more than two points.
+                if any(self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol
+                      for (x0, y0), (x1, y1) in zip(pts, pts[1:])):
                     return i
             else:
+                (x0, y0), (x1, y1) = pts[0], pts[1]
                 xmin, xmax = min(x0, x1), max(x0, x1)
                 ymin, ymax = min(y0, y1), max(y0, y1)
                 if xmin - tol <= px <= xmax + tol and ymin - tol <= py <= ymax + tol:
@@ -632,6 +664,20 @@ class OverlayCanvas(QGraphicsView):
                 and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)):
             self.markup_delete_selected()
             return
+        if self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline':
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_polyline_markup()
+                return
+            if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self._polyline_points:
+                self._polyline_points.pop()
+                if self._pending_markup:
+                    self._pending_markup['points'] = [list(p) for p in self._polyline_points]
+                if self._markup_item:
+                    self._markup_item.set_pending(self._pending_markup if self._polyline_points else None)
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_polyline_markup()
+                return
         if self._mode == self.MODE_MASK:
             if event.key() == Qt.Key.Key_Escape:
                 self.mask_cancel_pending()
@@ -846,6 +892,16 @@ class OverlayCanvas(QGraphicsView):
                         self._select_dragging = True
                         self._select_last = scene_pt
                     return
+                if self._markup_tool == 'polyline':
+                    self._polyline_points.append(self._scene_to_norm(scene_pt))
+                    self._pending_markup = {
+                        'type': 'polyline',
+                        'points': [list(p) for p in self._polyline_points],
+                        'color': self._markup_color,
+                        'width': self._markup_width,
+                    }
+                    self._markup_item.set_pending(self._pending_markup)
+                    return
                 start = self._scene_to_norm(scene_pt)
                 self._pending_markup = {
                     'type': self._markup_tool,
@@ -900,7 +956,7 @@ class OverlayCanvas(QGraphicsView):
             self._markup_item.set_markups(self._pair.markups)
             return
 
-        if self._pending_markup is not None:
+        if self._pending_markup is not None and self._markup_tool != 'polyline':
             cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
             self._pending_markup['points'][1] = cur
             self._markup_item.set_pending(self._pending_markup)
@@ -969,7 +1025,8 @@ class OverlayCanvas(QGraphicsView):
             self._select_dragging = False
             self.markups_changed.emit()   # committed move
             return
-        if self._pending_markup is not None and event.button() == Qt.MouseButton.LeftButton:
+        if (self._pending_markup is not None and self._markup_tool != 'polyline'
+                and event.button() == Qt.MouseButton.LeftButton):
             p0, p1 = self._pending_markup['points']
             # Discard accidental tiny marks.
             if abs(p1[0] - p0[0]) > 0.003 or abs(p1[1] - p0[1]) > 0.003:
@@ -999,6 +1056,10 @@ class OverlayCanvas(QGraphicsView):
             insert_idx = self._mask_edit_hit_edge(scene_pt)
             if insert_idx is not None:
                 self._mask_edit_insert_vertex(insert_idx, scene_pt)
+            return
+        if (self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline'
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._finish_polyline_markup()
             return
         super().mouseDoubleClickEvent(event)
 
@@ -1411,7 +1472,8 @@ class OverlayViewer(QWidget):
         markup_section.addWidget(select_btn)
 
         tool_row = QHBoxLayout()
-        for key, label in [('line', '╱ Line'), ('rect', '▭ Box'), ('cloud', '☁ Cloud')]:
+        for key, label in [('line', '╱ Line'), ('polyline', '〰 Polyline'),
+                           ('rect', '▭ Box'), ('cloud', '☁ Cloud')]:
             b = QPushButton(label)
             b.setCheckable(True)
             b.setStyleSheet(self._toggle_btn_style())
@@ -1455,8 +1517,10 @@ class OverlayViewer(QWidget):
         markup_section.addLayout(uc_row)
 
         markup_section.addWidget(QLabel(
-            "Draw tool: drag on the drawing. Select: click a markup to move it; "
-            "Delete key removes it. Pan with right-drag.",
+            "Line/Box/Cloud: drag on the drawing. Polyline: click to add each "
+            "point, double-click or Enter to finish (doesn't need to close); "
+            "Esc cancels, Backspace undoes the last point. Select: click a "
+            "markup to move it; Delete removes it. Pan with right-drag.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
