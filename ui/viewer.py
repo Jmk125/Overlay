@@ -173,6 +173,8 @@ class MaskedOverlayItem(QGraphicsItem):
         self._other_pixmap = None
         self._other_transform = QTransform()
         self._bg_color = QColor('#ffffff')
+        self._edit_index = None
+        self._edit_selected_vertex = None
         self.setZValue(900)   # above the base layers, below markups (1000)
 
     def boundingRect(self) -> QRectF:
@@ -210,6 +212,14 @@ class MaskedOverlayItem(QGraphicsItem):
         self._bg_color = color
         self.update()
 
+    def set_edit_index(self, index):
+        self._edit_index = index
+        self.update()
+
+    def set_edit_selected_vertex(self, index):
+        self._edit_selected_vertex = index
+        self.update()
+
     def paint(self, painter, option, widget=None):
         path = R.mask_clip_qpath(self._masks, self._w, self._h)
         if not path.isEmpty():
@@ -229,6 +239,24 @@ class MaskedOverlayItem(QGraphicsItem):
             elif self._composite_pixmap:
                 painter.drawPixmap(0, 0, self._composite_pixmap)
             painter.restore()
+
+        # The mask being reshaped in Edit mode always shows its handles,
+        # regardless of whether outline previews are otherwise on.
+        if self._edit_index is not None and 0 <= self._edit_index < len(self._masks):
+            pts = self._masks[self._edit_index].get('points', [])
+            spts = [QPointF(p[0] * self._w, p[1] * self._h) for p in pts]
+            if len(spts) >= 2:
+                epen = QPen(QColor('#00e0ff'))
+                epen.setWidthF(2)
+                epen.setCosmetic(True)
+                painter.setPen(epen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolygon(QPolygonF(spts))
+                painter.setPen(Qt.PenStyle.NoPen)
+                for i, p in enumerate(spts):
+                    painter.setBrush(QColor('#ffdd00') if i == self._edit_selected_vertex
+                                     else QColor('#00e0ff'))
+                    painter.drawEllipse(p, 5, 5)
 
         if not self._show_outlines:
             return
@@ -272,6 +300,7 @@ class OverlayCanvas(QGraphicsView):
     MODE_ROTATE = 2
     MODE_MARKUP = 3
     MODE_MASK = 4
+    MODE_MASK_EDIT = 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -319,6 +348,9 @@ class OverlayCanvas(QGraphicsView):
         # Masks (windowed overlay)
         self._mask_item = None
         self._mask_points = []            # in-progress polygon, normalized 0-1
+        self._mask_edit_index = None      # index of the mask being reshaped
+        self._mask_edit_selected = None   # index of its selected vertex
+        self._mask_edit_drag = None       # ('vertex', idx) or ('shape', last_scene_pos)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # receive Delete key
 
@@ -374,6 +406,13 @@ class OverlayCanvas(QGraphicsView):
     def set_mode(self, mode: int):
         if self._mode == self.MODE_MASK and mode != self.MODE_MASK:
             self.mask_cancel_pending()
+        if self._mode == self.MODE_MASK_EDIT and mode != self.MODE_MASK_EDIT:
+            self._mask_edit_index = None
+            self._mask_edit_selected = None
+            self._mask_edit_drag = None
+            if self._mask_item:
+                self._mask_item.set_edit_index(None)
+                self._mask_item.set_edit_selected_vertex(None)
         self._mode = mode
         if mode == self.MODE_VIEW:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
@@ -385,10 +424,25 @@ class OverlayCanvas(QGraphicsView):
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         elif mode == self.MODE_MASK:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        elif mode == self.MODE_MASK_EDIT:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         # Selecting a tool does NOT switch to the live colored preview — that
         # only happens while you actually drag (see mousePressEvent). When idle
         # the canvas stays flattened to the composite.
         self._update_visibility()
+
+    def start_mask_edit(self, index: int):
+        """Enter Edit mode for one mask: drag its vertices to reshape it, or
+        drag its body to move the whole shape."""
+        if not self._pair or not (0 <= index < len(self._pair.masks)):
+            return
+        self._mask_edit_index = index
+        self.set_mode(self.MODE_MASK_EDIT)
+        if self._mask_item:
+            self._mask_item.set_edit_index(index)
+
+    def stop_mask_edit(self):
+        self.set_mode(self.MODE_VIEW)
 
     def load_pixmaps(self, pix_a, pix_b, pix_composite, pair: OverlayPair,
                      reset_view: bool = False):
@@ -403,6 +457,10 @@ class OverlayCanvas(QGraphicsView):
         # they're recreated below (_apply_b_transform syncs the mask layer).
         self._mask_item = None
         self._markup_item = None
+        # A fresh pair (or re-render) invalidates any in-progress mask edit.
+        self._mask_edit_index = None
+        self._mask_edit_selected = None
+        self._mask_edit_drag = None
         self._item_a = self.gscene.addPixmap(pix_a if pix_a else QPixmap())
         self._item_b = self.gscene.addPixmap(pix_b if pix_b else QPixmap())
         self._item_composite = self.gscene.addPixmap(pix_composite if pix_composite else QPixmap())
@@ -533,6 +591,14 @@ class OverlayCanvas(QGraphicsView):
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._finish_mask_polygon()
                 return
+        if self._mode == self.MODE_MASK_EDIT:
+            if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.stop_mask_edit()
+                return
+            if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                    and self._mask_edit_selected is not None):
+                self._mask_edit_delete_selected_vertex()
+                return
         super().keyPressEvent(event)
 
     def _b_qtransform(self) -> QTransform:
@@ -606,7 +672,8 @@ class OverlayCanvas(QGraphicsView):
             # Masks only ever show in the "Masked Overlay" view — never bleed
             # into Overlay/A-only/B-only.
             self._mask_item.setVisible(mask_mode)
-            self._mask_item.set_show_outlines(mask_mode and self._mode == self.MODE_MASK)
+            self._mask_item.set_show_outlines(
+                mask_mode and self._mode in (self.MODE_MASK, self.MODE_MASK_EDIT))
 
     def refresh_mask_view(self):
         """Re-evaluate visibility and the cutout layer after `pair.mask_base`
@@ -627,7 +694,53 @@ class OverlayCanvas(QGraphicsView):
         """If panning is bound to the left button, don't pan while a tool that
         uses the left drag (align, markup or mask) is active."""
         return (self._pan_button == Qt.MouseButton.LeftButton
-                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP, self.MODE_MASK))
+                and self._mode in (self.MODE_MOVE, self.MODE_ROTATE, self.MODE_MARKUP,
+                                   self.MODE_MASK, self.MODE_MASK_EDIT))
+
+    def _mask_edit_hit_vertex(self, scene_pos):
+        """Index of the vertex of the mask being edited near scene_pos, or None."""
+        if self._mask_edit_index is None or not self._pair:
+            return None
+        if not (0 <= self._mask_edit_index < len(self._pair.masks)):
+            return None
+        pts = self._pair.masks[self._mask_edit_index].get('points', [])
+        W, H = self._canvas_w, self._canvas_h
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale
+        px, py = scene_pos.x(), scene_pos.y()
+        for i in range(len(pts) - 1, -1, -1):
+            x, y = pts[i][0] * W, pts[i][1] * H
+            if math.hypot(px - x, py - y) <= tol:
+                return i
+        return None
+
+    def _mask_edit_point_inside(self, scene_pos) -> bool:
+        """True if scene_pos falls inside the mask currently being edited."""
+        if self._mask_edit_index is None or not self._pair:
+            return False
+        if not (0 <= self._mask_edit_index < len(self._pair.masks)):
+            return False
+        m = dict(self._pair.masks[self._mask_edit_index])
+        m['visible'] = True   # editing a hidden mask should still hit-test
+        path = R.mask_clip_qpath([m], self._canvas_w, self._canvas_h)
+        return path.contains(scene_pos)
+
+    def _mask_edit_select_vertex(self, idx):
+        self._mask_edit_selected = idx
+        if self._mask_item:
+            self._mask_item.set_edit_selected_vertex(idx)
+
+    def _mask_edit_delete_selected_vertex(self):
+        if self._mask_edit_index is None or not self._pair:
+            return
+        pts = self._pair.masks[self._mask_edit_index].get('points', [])
+        idx = self._mask_edit_selected
+        if idx is None or not (0 <= idx < len(pts)) or len(pts) <= 3:
+            return
+        del pts[idx]
+        self._mask_edit_select_vertex(None)
+        if self._mask_item:
+            self._mask_item.set_masks(self._pair.masks)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == self._pan_button and not self._pan_blocked_on_left():
@@ -658,6 +771,18 @@ class OverlayCanvas(QGraphicsView):
                 scene_pt = self.mapToScene(event.position().toPoint())
                 self._mask_points.append(self._scene_to_norm(scene_pt))
                 self._mask_item.set_pending_points(self._mask_points)
+                return
+            if self._mode == self.MODE_MASK_EDIT:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                vidx = self._mask_edit_hit_vertex(scene_pt)
+                if vidx is not None:
+                    self._mask_edit_drag = ('vertex', vidx)
+                    self._mask_edit_select_vertex(vidx)
+                elif self._mask_edit_point_inside(scene_pt):
+                    self._mask_edit_drag = ('shape', scene_pt)
+                    self._mask_edit_select_vertex(None)
+                else:
+                    self._mask_edit_drag = None
                 return
             if self._mode in (self.MODE_MOVE, self.MODE_ROTATE):
                 self._drag_start = self.mapToScene(event.position().toPoint())
@@ -691,6 +816,23 @@ class OverlayCanvas(QGraphicsView):
             cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
             self._pending_markup['points'][1] = cur
             self._markup_item.set_pending(self._pending_markup)
+            return
+
+        if self._mask_edit_drag is not None and self._pair is not None:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            kind, payload = self._mask_edit_drag
+            pts = self._pair.masks[self._mask_edit_index]['points']
+            if kind == 'vertex':
+                pts[payload] = self._scene_to_norm(scene_pt)
+            else:   # 'shape' — payload is the last scene position
+                dx = (scene_pt.x() - payload.x()) / self._canvas_w
+                dy = (scene_pt.y() - payload.y()) / self._canvas_h
+                for p in pts:
+                    p[0] += dx
+                    p[1] += dy
+                self._mask_edit_drag = ('shape', scene_pt)
+            if self._mask_item:
+                self._mask_item.set_masks(self._pair.masks)
             return
 
         if event.buttons() & Qt.MouseButton.LeftButton and self._pair:
@@ -732,6 +874,9 @@ class OverlayCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._mask_edit_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._mask_edit_drag = None
+            return
         if self._select_dragging and event.button() == Qt.MouseButton.LeftButton:
             self._select_dragging = False
             self.markups_changed.emit()   # committed move
@@ -784,15 +929,21 @@ class OverlayCanvas(QGraphicsView):
             self._mask_item.set_pending_points([])
 
     def mask_remove_at(self, index: int):
-        if self._pair and 0 <= index < len(self._pair.masks):
-            del self._pair.masks[index]
-            if self._mask_item:
-                self._mask_item.set_masks(self._pair.masks)
-            self.masks_changed.emit()
+        if not (self._pair and 0 <= index < len(self._pair.masks)):
+            return
+        if self._mask_edit_index == index:
+            self.set_mode(self.MODE_VIEW)   # was being edited — stop first
+        elif self._mask_edit_index is not None and index < self._mask_edit_index:
+            self._mask_edit_index -= 1      # keep pointing at the same mask
+        del self._pair.masks[index]
+        if self._mask_item:
+            self._mask_item.set_masks(self._pair.masks)
+        self.masks_changed.emit()
 
     def mask_clear(self):
         if self._pair and self._pair.masks:
             self._pair.masks.clear()
+            self.set_mode(self.MODE_VIEW)   # drop any in-progress draw/edit
             if self._mask_item:
                 self._mask_item.set_masks(self._pair.masks)
             self.masks_changed.emit()
@@ -1012,29 +1163,25 @@ class OverlayViewer(QWidget):
         self.draw_mask_btn.clicked.connect(self._toggle_mask_draw)
         self.mask_section.addWidget(self.draw_mask_btn)
 
-        self.mask_section.addWidget(QLabel("Masks (check to show/hide, double-click to rename):",
-                                           wordWrap=True, styleSheet="color:#888; font-size:9px;"))
+        self.mask_section.addWidget(QLabel(
+            "Masks (check to show/hide, type to rename, ✎ to reshape):",
+            wordWrap=True, styleSheet="color:#888; font-size:9px;"))
         self.mask_list = QListWidget()
         self.mask_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
-        self.mask_list.setFixedHeight(110)
-        self.mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self.mask_list.setFixedHeight(130)
         self.mask_section.addWidget(self.mask_list)
 
-        mask_list_btns = QHBoxLayout()
-        remove_mask_btn = QPushButton("Remove Selected")
-        remove_mask_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
-        remove_mask_btn.clicked.connect(self._remove_selected_mask)
-        clear_masks_btn = QPushButton("Clear All")
+        clear_masks_btn = QPushButton("Clear All Masks")
         clear_masks_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
         clear_masks_btn.clicked.connect(self.canvas.mask_clear)
-        mask_list_btns.addWidget(remove_mask_btn)
-        mask_list_btns.addWidget(clear_masks_btn)
-        self.mask_section.addLayout(mask_list_btns)
+        self.mask_section.addWidget(clear_masks_btn)
 
         self.mask_section.addWidget(QLabel(
-            "Click to place points; double-click or Enter closes the shape and "
-            "stops drawing (click Draw Mask again to start a separate one). "
-            "Esc cancels it; Backspace removes its last point.",
+            "Draw: click to place points; double-click or Enter closes the shape "
+            "and stops (click Draw Mask again for a separate one); Esc cancels; "
+            "Backspace removes the last point. Edit (✎): drag a point to reshape, "
+            "drag inside to move the whole mask, Delete removes the selected "
+            "point, Esc/Enter finishes.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(self.mask_section)
         self.mask_section.setVisible(False)   # only relevant in the mask view
@@ -1363,39 +1510,69 @@ class OverlayViewer(QWidget):
         self.mask_cutout_chk.blockSignals(False)
         self._refresh_mask_list()
 
-    # ── Masks list (show/hide + rename each mask) ───────────────────
+    # ── Masks list (show/hide, rename, edit-shape and delete each mask) ──
     def _refresh_mask_list(self):
         pair = self._current_pair()
-        self.mask_list.blockSignals(True)
+        editing = self.canvas._mask_edit_index
         self.mask_list.clear()
         for i, m in enumerate(pair.masks):
-            item = QListWidgetItem(m.get('name') or f'Mask {i + 1}')
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable)
-            item.setCheckState(Qt.CheckState.Checked if m.get('visible', True)
-                               else Qt.CheckState.Unchecked)
+            item = QListWidgetItem()
             self.mask_list.addItem(item)
-        self.mask_list.blockSignals(False)
 
-    def _on_mask_item_changed(self, item: QListWidgetItem):
-        idx = item.data(Qt.ItemDataRole.UserRole)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(4)
+
+            chk = QCheckBox()
+            chk.setChecked(m.get('visible', True))
+            chk.toggled.connect(lambda checked, idx=i: self._on_mask_visible_toggled(idx, checked))
+            row_layout.addWidget(chk)
+
+            name_edit = QLineEdit(m.get('name') or f'Mask {i + 1}')
+            name_edit.setStyleSheet("background:#2a2a2a; color:#ddd; border:1px solid #444; padding:2px;")
+            name_edit.editingFinished.connect(
+                lambda idx=i, w=name_edit: self._on_mask_renamed(idx, w.text()))
+            row_layout.addWidget(name_edit, 1)
+
+            edit_btn = QPushButton("✎")
+            edit_btn.setToolTip("Edit shape")
+            edit_btn.setFixedSize(24, 22)
+            edit_btn.setCheckable(True)
+            edit_btn.setChecked(editing == i)
+            edit_btn.setStyleSheet(self._toggle_btn_style())
+            edit_btn.clicked.connect(lambda _, idx=i: self._toggle_mask_edit(idx))
+            row_layout.addWidget(edit_btn)
+
+            del_btn = QPushButton("🗑")
+            del_btn.setToolTip("Delete this mask")
+            del_btn.setFixedSize(24, 22)
+            del_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; border-radius:3px;")
+            del_btn.clicked.connect(lambda _, idx=i: self.canvas.mask_remove_at(idx))
+            row_layout.addWidget(del_btn)
+
+            item.setSizeHint(row.sizeHint())
+            self.mask_list.setItemWidget(item, row)
+
+    def _on_mask_visible_toggled(self, index: int, checked: bool):
         pair = self._current_pair()
-        if idx is None or not (0 <= idx < len(pair.masks)):
-            return
-        m = pair.masks[idx]
-        visible = item.checkState() == Qt.CheckState.Checked
-        changed = visible != m.get('visible', True)
-        m['visible'] = visible
-        text = item.text().strip()
-        if text and text != m.get('name', ''):
-            m['name'] = text
-        if changed:
+        if 0 <= index < len(pair.masks):
+            pair.masks[index]['visible'] = checked
             self.canvas.masks_updated()
 
-    def _remove_selected_mask(self):
-        row = self.mask_list.currentRow()
-        if row >= 0:
-            self.canvas.mask_remove_at(row)
+    def _on_mask_renamed(self, index: int, text: str):
+        pair = self._current_pair()
+        text = text.strip()
+        if 0 <= index < len(pair.masks) and text:
+            pair.masks[index]['name'] = text
+
+    def _toggle_mask_edit(self, index: int):
+        self.draw_mask_btn.setChecked(False)
+        if self.canvas._mask_edit_index == index:
+            self.canvas.stop_mask_edit()
+        else:
+            self.canvas.start_mask_edit(index)
+        self._refresh_mask_list()
 
     def _on_canvas_masks_changed(self):
         self.draw_mask_btn.setChecked(False)
@@ -1635,6 +1812,7 @@ class OverlayViewer(QWidget):
         for b in self.markup_btns.values():
             b.setChecked(False)
         self.draw_mask_btn.setChecked(False)
+        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _set_markup_tool(self, tool: str):
         self.canvas.set_markup_tool(tool)
@@ -1645,6 +1823,7 @@ class OverlayViewer(QWidget):
         self.move_btn.setChecked(False)
         self.rotate_btn.setChecked(False)
         self.draw_mask_btn.setChecked(False)
+        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _toggle_mask_draw(self):
         if self.draw_mask_btn.isChecked():
@@ -1656,6 +1835,7 @@ class OverlayViewer(QWidget):
                 b.setChecked(False)
         else:
             self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
+        self._refresh_mask_list()   # un-highlight any mask being edited
 
     def _set_mask_base(self, which: str):
         pair = self._current_pair()
