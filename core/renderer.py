@@ -334,6 +334,35 @@ def composite_masked(overlay_img: Image.Image, base_img: Image.Image,
     return Image.composite(a, b, clip)
 
 
+def composite_masked_cutout(base_img: Image.Image, other_by_color: dict,
+                            masks: list, width: int, height: int) -> Image.Image:
+    """Cutout variant of composite_masked where each mask can reveal the
+    "other" drawing in its own color.
+
+    `other_by_color` maps each mask's `color` value (or None for the pair's
+    default) to that color's pre-rendered single-colored image of the other
+    drawing — build it once per distinct color in use, not per mask.
+    """
+    result = base_img.convert("RGBA")
+    if result.size != (width, height):
+        result = result.resize((width, height))
+    for m in masks:
+        if not m.get('visible', True):
+            continue
+        pts = m.get('points', [])
+        if len(pts) < 3:
+            continue
+        img = other_by_color.get(m.get('color'))
+        if img is None:
+            continue
+        clip = mask_clip_image([m], width, height)
+        a = img.convert("RGBA")
+        if a.size != (width, height):
+            a = a.resize((width, height))
+        result = Image.composite(a, result, clip)
+    return result
+
+
 def get_page_count(pdf_path: str) -> int:
     doc = fitz.open(pdf_path)
     count = len(doc)
