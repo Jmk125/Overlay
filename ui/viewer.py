@@ -238,6 +238,8 @@ class MaskedOverlayItem(QGraphicsItem):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for m in self._masks:
+            if not m.get('visible', True):
+                continue
             pts = m.get('points', [])
             if len(pts) >= 2:
                 poly = QPolygonF([QPointF(p[0] * self._w, p[1] * self._h) for p in pts])
@@ -601,10 +603,10 @@ class OverlayCanvas(QGraphicsView):
             # Make B translucent while aligning so overlaps are visible.
             self._item_b.setOpacity(0.6 if live else 1.0)
         if self._mask_item:
-            # Show the clipped composite window either in the mask view, or
-            # live while the mask-draw tool is active (as an editing preview).
-            self._mask_item.setVisible(mask_mode or self._mode == self.MODE_MASK)
-            self._mask_item.set_show_outlines(self._mode == self.MODE_MASK)
+            # Masks only ever show in the "Masked Overlay" view — never bleed
+            # into Overlay/A-only/B-only.
+            self._mask_item.setVisible(mask_mode)
+            self._mask_item.set_show_outlines(mask_mode and self._mode == self.MODE_MASK)
 
     def refresh_mask_view(self):
         """Re-evaluate visibility and the cutout layer after `pair.mask_base`
@@ -763,22 +765,27 @@ class OverlayCanvas(QGraphicsView):
 
     # ── Masks ─────────────────────────────────────────────────────
     def _finish_mask_polygon(self):
-        """Close the in-progress polygon (needs >= 3 points) into a new mask."""
+        """Close the in-progress polygon (needs >= 3 points) into a new mask,
+        then stop drawing — a fresh click on Draw Mask starts a separate one."""
         if self._pair is not None and len(self._mask_points) >= 3:
-            self._pair.masks.append({'points': [list(p) for p in self._mask_points]})
+            self._pair.masks.append({
+                'points': [list(p) for p in self._mask_points],
+                'visible': True,
+                'name': f'Mask {len(self._pair.masks) + 1}',
+            })
             if self._mask_item:
                 self._mask_item.set_masks(self._pair.masks)
             self.masks_changed.emit()
-        self.mask_cancel_pending()
+        self.set_mode(self.MODE_VIEW)
 
     def mask_cancel_pending(self):
         self._mask_points = []
         if self._mask_item:
             self._mask_item.set_pending_points([])
 
-    def mask_undo(self):
-        if self._pair and self._pair.masks:
-            self._pair.masks.pop()
+    def mask_remove_at(self, index: int):
+        if self._pair and 0 <= index < len(self._pair.masks):
+            del self._pair.masks[index]
             if self._mask_item:
                 self._mask_item.set_masks(self._pair.masks)
             self.masks_changed.emit()
@@ -789,6 +796,12 @@ class OverlayCanvas(QGraphicsView):
             if self._mask_item:
                 self._mask_item.set_masks(self._pair.masks)
             self.masks_changed.emit()
+
+    def masks_updated(self):
+        """Refresh the mask overlay after directly mutating pair.masks in
+        place (a visibility toggle or rename from the Masks list)."""
+        if self._mask_item and self._pair:
+            self._mask_item.set_masks(self._pair.masks)
 
     def fit_view(self):
         self.fitInView(self.gscene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -887,6 +900,7 @@ class OverlayViewer(QWidget):
         self.canvas = OverlayCanvas()
         self.canvas.pair_changed.connect(self._on_pair_changed)
         self.canvas.pair_preview.connect(self._on_pair_preview)
+        self.canvas.masks_changed.connect(self._on_canvas_masks_changed)
         center_layout.addWidget(self.canvas, 1)
 
         self.progress = QProgressBar()
@@ -900,23 +914,37 @@ class OverlayViewer(QWidget):
         self.progress.setVisible(False)
         center_layout.addWidget(self.progress)
 
-        root.addWidget(center, 1)
-
-        # Thin strip shown when the right panel is collapsed.
-        self.right_bar = self._make_collapsed_bar("‹", "Show tools",
-                                                   lambda: self._set_right_collapsed(False))
-        root.addWidget(self.right_bar)
-        self.right_bar.setVisible(False)
-
-        # ── Right: tools panel (collapsible) ──────────────────────
+        # ── Right: tools panel (collapsible, drag-resizable) ──────
         right_panel = QWidget()
         right_panel.setStyleSheet("background: #161616;")
         self.right_scroll = QScrollArea()
         self.right_scroll.setWidget(right_panel)
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setStyleSheet("border: none;")
-        self.right_scroll.setFixedWidth(272)
-        root.addWidget(self.right_scroll)
+        self.right_scroll.setMinimumWidth(220)
+        self.right_scroll.setMaximumWidth(600)
+
+        # A splitter between the canvas and the tools pane lets the user drag
+        # the boundary to widen it (text was getting clipped at a fixed width).
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setHandleWidth(6)
+        self.main_splitter.setStyleSheet(
+            "QSplitter::handle { background: #222; } "
+            "QSplitter::handle:hover { background: #3a5d82; }")
+        self.main_splitter.addWidget(center)
+        self.main_splitter.addWidget(self.right_scroll)
+        self.main_splitter.setStretchFactor(0, 1)   # canvas absorbs extra space
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setSizes([800, 300])
+        root.addWidget(self.main_splitter, 1)
+
+        # Thin strip shown when the right panel is collapsed.
+        self.right_bar = self._make_collapsed_bar("‹", "Show tools",
+                                                   lambda: self._set_right_collapsed(False))
+        root.addWidget(self.right_bar)
+        self.right_bar.setVisible(False)
 
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
@@ -950,6 +978,66 @@ class OverlayViewer(QWidget):
             view_section.addWidget(btn)
         self.view_btns['composite'].setChecked(True)
         right_layout.addWidget(view_section)
+
+        # Masks section — only relevant to (and only shown during) the
+        # "Masked Overlay" view, so it stays out of the way otherwise.
+        self.mask_section = CollapsibleSection("Mask (Windowed Overlay)", collapsed=False)
+        self.mask_section.addWidget(QLabel(
+            "Base shows outside the mask; inside it shows either the full "
+            "overlay or (with Cutout) just the other drawing.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+
+        base_row = QHBoxLayout()
+        base_row.addWidget(QLabel("Base:"))
+        self.mask_base_btns = {}
+        for key, label in [('a', 'Set A'), ('b', 'Set B')]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setStyleSheet(self._toggle_btn_style())
+            b.clicked.connect(lambda _, k=key: self._set_mask_base(k))
+            self.mask_base_btns[key] = b
+            base_row.addWidget(b)
+        self.mask_base_btns['a'].setChecked(True)
+        self.mask_section.addLayout(base_row)
+
+        self.mask_cutout_chk = QCheckBox(
+            "Cutout: reveal only the other drawing inside the mask (no overlay)")
+        self.mask_cutout_chk.setStyleSheet("color:#ccc;")
+        self.mask_cutout_chk.toggled.connect(self._on_mask_cutout_toggled)
+        self.mask_section.addWidget(self.mask_cutout_chk)
+
+        self.draw_mask_btn = QPushButton("✛ Draw Mask (click points, double-click/Enter to close)")
+        self.draw_mask_btn.setCheckable(True)
+        self.draw_mask_btn.setStyleSheet(self._toggle_btn_style())
+        self.draw_mask_btn.clicked.connect(self._toggle_mask_draw)
+        self.mask_section.addWidget(self.draw_mask_btn)
+
+        self.mask_section.addWidget(QLabel("Masks (check to show/hide, double-click to rename):",
+                                           wordWrap=True, styleSheet="color:#888; font-size:9px;"))
+        self.mask_list = QListWidget()
+        self.mask_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
+        self.mask_list.setFixedHeight(110)
+        self.mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self.mask_section.addWidget(self.mask_list)
+
+        mask_list_btns = QHBoxLayout()
+        remove_mask_btn = QPushButton("Remove Selected")
+        remove_mask_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
+        remove_mask_btn.clicked.connect(self._remove_selected_mask)
+        clear_masks_btn = QPushButton("Clear All")
+        clear_masks_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
+        clear_masks_btn.clicked.connect(self.canvas.mask_clear)
+        mask_list_btns.addWidget(remove_mask_btn)
+        mask_list_btns.addWidget(clear_masks_btn)
+        self.mask_section.addLayout(mask_list_btns)
+
+        self.mask_section.addWidget(QLabel(
+            "Click to place points; double-click or Enter closes the shape and "
+            "stops drawing (click Draw Mask again to start a separate one). "
+            "Esc cancels it; Backspace removes its last point.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+        right_layout.addWidget(self.mask_section)
+        self.mask_section.setVisible(False)   # only relevant in the mask view
 
         # Align section
         align_section = CollapsibleSection("Align Drawing B", collapsed=True)
@@ -1109,57 +1197,6 @@ class OverlayViewer(QWidget):
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
-        # Masks section — carve out a "window" where the full overlay shows
-        # through a single base drawing.
-        mask_section = CollapsibleSection("Mask (Windowed Overlay)", collapsed=True)
-        mask_section.addWidget(QLabel(
-            "Base shows outside the mask; inside it shows either the full "
-            "overlay or (with Cutout) just the other drawing. Switch View to "
-            "“Masked Overlay” to see the result.",
-            styleSheet="color:#666; font-size:9px;", wordWrap=True))
-
-        base_row = QHBoxLayout()
-        base_row.addWidget(QLabel("Base:"))
-        self.mask_base_btns = {}
-        for key, label in [('a', 'Set A'), ('b', 'Set B')]:
-            b = QPushButton(label)
-            b.setCheckable(True)
-            b.setStyleSheet(self._toggle_btn_style())
-            b.clicked.connect(lambda _, k=key: self._set_mask_base(k))
-            self.mask_base_btns[key] = b
-            base_row.addWidget(b)
-        self.mask_base_btns['a'].setChecked(True)
-        mask_section.addLayout(base_row)
-
-        self.mask_cutout_chk = QCheckBox(
-            "Cutout: reveal only the other drawing inside the mask (no overlay)")
-        self.mask_cutout_chk.setStyleSheet("color:#ccc;")
-        self.mask_cutout_chk.toggled.connect(self._on_mask_cutout_toggled)
-        mask_section.addWidget(self.mask_cutout_chk)
-
-        self.draw_mask_btn = QPushButton("✛ Draw Mask (click points, double-click/Enter to close)")
-        self.draw_mask_btn.setCheckable(True)
-        self.draw_mask_btn.setStyleSheet(self._toggle_btn_style())
-        self.draw_mask_btn.clicked.connect(self._toggle_mask_draw)
-        mask_section.addWidget(self.draw_mask_btn)
-
-        mask_uc_row = QHBoxLayout()
-        mask_undo_btn = QPushButton("↶ Undo Last Mask")
-        mask_undo_btn.setStyleSheet("background:#3a3a3a; color:white; border:none; padding:4px; border-radius:3px;")
-        mask_undo_btn.clicked.connect(self.canvas.mask_undo)
-        mask_clear_btn = QPushButton("Clear Masks")
-        mask_clear_btn.setStyleSheet("background:#5e2a2a; color:white; border:none; padding:4px; border-radius:3px;")
-        mask_clear_btn.clicked.connect(self.canvas.mask_clear)
-        mask_uc_row.addWidget(mask_undo_btn)
-        mask_uc_row.addWidget(mask_clear_btn)
-        mask_section.addLayout(mask_uc_row)
-
-        mask_section.addWidget(QLabel(
-            "Click to place points; double-click or Enter closes the shape. "
-            "Esc cancels it; Backspace removes its last point.",
-            styleSheet="color:#666; font-size:9px;", wordWrap=True))
-        right_layout.addWidget(mask_section)
-
         # Notes section (per drawing)
         notes_section = CollapsibleSection("Notes (this drawing)", collapsed=True)
         self.notes_edit = QPlainTextEdit()
@@ -1318,12 +1355,51 @@ class OverlayViewer(QWidget):
         self.notes_edit.setPlainText(pair.notes or "")
         self.notes_edit.blockSignals(False)
 
-        # Sync the mask base selector and cutout toggle to this pair.
+        # Sync the mask base selector, cutout toggle and masks list to this pair.
         self.mask_base_btns['a'].setChecked(pair.mask_base != 'b')
         self.mask_base_btns['b'].setChecked(pair.mask_base == 'b')
         self.mask_cutout_chk.blockSignals(True)
         self.mask_cutout_chk.setChecked(pair.mask_cutout)
         self.mask_cutout_chk.blockSignals(False)
+        self._refresh_mask_list()
+
+    # ── Masks list (show/hide + rename each mask) ───────────────────
+    def _refresh_mask_list(self):
+        pair = self._current_pair()
+        self.mask_list.blockSignals(True)
+        self.mask_list.clear()
+        for i, m in enumerate(pair.masks):
+            item = QListWidgetItem(m.get('name') or f'Mask {i + 1}')
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable)
+            item.setCheckState(Qt.CheckState.Checked if m.get('visible', True)
+                               else Qt.CheckState.Unchecked)
+            self.mask_list.addItem(item)
+        self.mask_list.blockSignals(False)
+
+    def _on_mask_item_changed(self, item: QListWidgetItem):
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        pair = self._current_pair()
+        if idx is None or not (0 <= idx < len(pair.masks)):
+            return
+        m = pair.masks[idx]
+        visible = item.checkState() == Qt.CheckState.Checked
+        changed = visible != m.get('visible', True)
+        m['visible'] = visible
+        text = item.text().strip()
+        if text and text != m.get('name', ''):
+            m['name'] = text
+        if changed:
+            self.canvas.masks_updated()
+
+    def _remove_selected_mask(self):
+        row = self.mask_list.currentRow()
+        if row >= 0:
+            self.canvas.mask_remove_at(row)
+
+    def _on_canvas_masks_changed(self):
+        self.draw_mask_btn.setChecked(False)
+        self._refresh_mask_list()
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
@@ -1540,6 +1616,7 @@ class OverlayViewer(QWidget):
         for k, btn in self.view_btns.items():
             btn.setChecked(k == mode)
         self.canvas.set_view_mode(mode)
+        self.mask_section.setVisible(mode == 'mask')
 
     def _set_align_mode(self, mode: str):
         if mode == 'move':
