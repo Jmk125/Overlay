@@ -772,6 +772,36 @@ class OverlayCanvas(QGraphicsView):
                 return i
         return None
 
+    def _mask_edit_hit_edge(self, scene_pos):
+        """Index to insert a new vertex at if scene_pos is near one of the
+        editing mask's edges, else None. The new point goes between the edge's
+        two endpoints — i.e. right before the returned index."""
+        if self._mask_edit_index is None or not self._pair:
+            return None
+        if not (0 <= self._mask_edit_index < len(self._pair.masks)):
+            return None
+        pts = self._pair.masks[self._mask_edit_index].get('points', [])
+        n = len(pts)
+        if n < 2:
+            return None
+        W, H = self._canvas_w, self._canvas_h
+        scale = self.transform().m11() or 1.0
+        tol = 10.0 / scale
+        px, py = scene_pos.x(), scene_pos.y()
+        for i in range(n):
+            x0, y0 = pts[i][0] * W, pts[i][1] * H
+            x1, y1 = pts[(i + 1) % n][0] * W, pts[(i + 1) % n][1] * H
+            if self._dist_to_segment(px, py, x0, y0, x1, y1) <= tol:
+                return i + 1
+        return None
+
+    def _mask_edit_insert_vertex(self, insert_idx: int, scene_pos):
+        pts = self._pair.masks[self._mask_edit_index]['points']
+        pts.insert(insert_idx, self._scene_to_norm(scene_pos))
+        self._mask_edit_select_vertex(insert_idx)
+        if self._mask_item:
+            self._mask_item.set_masks(self._pair.masks)
+
     def _mask_edit_point_inside(self, scene_pos) -> bool:
         """True if scene_pos falls inside the mask currently being edited."""
         if self._mask_edit_index is None or not self._pair:
@@ -963,6 +993,12 @@ class OverlayCanvas(QGraphicsView):
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if self._mode == self.MODE_MASK and event.button() == Qt.MouseButton.LeftButton:
             self._finish_mask_polygon()
+            return
+        if self._mode == self.MODE_MASK_EDIT and event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            insert_idx = self._mask_edit_hit_edge(scene_pt)
+            if insert_idx is not None:
+                self._mask_edit_insert_vertex(insert_idx, scene_pt)
             return
         super().mouseDoubleClickEvent(event)
 
@@ -1260,8 +1296,8 @@ class OverlayViewer(QWidget):
             "Draw: click to place points; double-click or Enter closes the shape "
             "and stops (click Draw Mask again for a separate one); Esc cancels; "
             "Backspace removes the last point. Edit (✎): drag a point to reshape, "
-            "drag inside to move the whole mask, Delete removes the selected "
-            "point, Esc/Enter finishes.",
+            "double-click a line to add a point there, drag inside to move the "
+            "whole mask, Delete removes the selected point, Esc/Enter finishes.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(self.mask_section)
         self.mask_section.setVisible(False)   # only relevant in the mask view
