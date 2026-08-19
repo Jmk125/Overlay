@@ -391,6 +391,10 @@ class OverlayCanvas(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # Needed so a markup's pending shape keeps live-previewing to the
+        # cursor after a plain click (no button held) started it, not just
+        # while actively dragging.
+        self.setMouseTracking(True)
         self._bg_white = True
         self._apply_bg()
 
@@ -489,9 +493,13 @@ class OverlayCanvas(QGraphicsView):
             self.gscene.update()
 
     def set_mode(self, mode: int):
-        if (self._mode == self.MODE_MARKUP and mode != self.MODE_MARKUP
-                and self._markup_tool == 'polyline'):
-            self._cancel_polyline_markup()
+        if self._mode == self.MODE_MARKUP and mode != self.MODE_MARKUP:
+            if self._markup_tool == 'polyline':
+                self._cancel_polyline_markup()
+            elif self._pending_markup is not None:
+                self._pending_markup = None
+                if self._markup_item:
+                    self._markup_item.set_pending(None)
         if self._mode == self.MODE_MASK and mode != self.MODE_MASK:
             self.mask_cancel_pending()
         if self._mode == self.MODE_MASK_EDIT and mode != self.MODE_MASK_EDIT:
@@ -612,11 +620,32 @@ class OverlayCanvas(QGraphicsView):
 
     # ── Markups ───────────────────────────────────────────────────
     def set_markup_tool(self, tool: str):
-        if self._markup_tool == 'polyline' and tool != 'polyline':
-            self._cancel_polyline_markup()
+        if tool != self._markup_tool:
+            if self._markup_tool == 'polyline':
+                self._cancel_polyline_markup()
+            elif self._pending_markup is not None:
+                # A click-started line/rect/cloud left open — abandon it,
+                # the new tool starts fresh.
+                self._pending_markup = None
+                if self._markup_item:
+                    self._markup_item.set_pending(None)
         self._markup_tool = tool
         if tool != 'select':
             self._select_markup(None)
+
+    def _commit_pending_markup(self):
+        """Commit the pending line/rect/cloud (built by drag or click-click)
+        as a new markup, discarding it if it never grew past a point."""
+        p0, p1 = self._pending_markup['points']
+        if abs(p1[0] - p0[0]) > 0.003 or abs(p1[1] - p0[1]) > 0.003:
+            if self._pair is not None:
+                self._pair.markups.append(self._pending_markup)
+                if self._markup_item:
+                    self._markup_item.set_markups(self._pair.markups)
+                self.markups_changed.emit()
+        self._pending_markup = None
+        if self._markup_item:
+            self._markup_item.set_pending(None)
 
     def _finish_polyline_markup(self):
         """Close the in-progress polyline (needs >= 2 points) into a new
@@ -860,9 +889,6 @@ class OverlayCanvas(QGraphicsView):
             self.markup_delete_selected()
             return
         if self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline':
-            if event.key() == Qt.Key.Key_Escape:
-                self._cancel_polyline_markup()
-                return
             if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self._polyline_points:
                 self._polyline_points.pop()
                 if self._pending_markup:
@@ -873,6 +899,11 @@ class OverlayCanvas(QGraphicsView):
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._finish_polyline_markup()
                 return
+        if self._mode == self.MODE_MARKUP and event.key() == Qt.Key.Key_Escape:
+            # Turn the markup tool off entirely (also drops any in-progress
+            # shape — a click-started line/rect/cloud or polyline).
+            self.set_mode(self.MODE_VIEW)
+            return
         if self._mode == self.MODE_MASK:
             if event.key() == Qt.Key.Key_Escape:
                 self.mask_cancel_pending()
@@ -1105,6 +1136,13 @@ class OverlayCanvas(QGraphicsView):
                     }
                     self._markup_item.set_pending(self._pending_markup)
                     return
+                if self._pending_markup is not None:
+                    # Second click: finish a shape that was left open after a
+                    # plain first click (as opposed to a press-drag-release).
+                    end = self._scene_to_norm(scene_pt)
+                    self._pending_markup['points'][1] = end
+                    self._commit_pending_markup()
+                    return
                 start = self._scene_to_norm(scene_pt)
                 self._pending_markup = {
                     'type': self._markup_tool,
@@ -1265,15 +1303,12 @@ class OverlayCanvas(QGraphicsView):
         if (self._pending_markup is not None and self._markup_tool != 'polyline'
                 and event.button() == Qt.MouseButton.LeftButton):
             p0, p1 = self._pending_markup['points']
-            # Discard accidental tiny marks.
             if abs(p1[0] - p0[0]) > 0.003 or abs(p1[1] - p0[1]) > 0.003:
-                if self._pair is not None:
-                    self._pair.markups.append(self._pending_markup)
-                    self._markup_item.set_markups(self._pair.markups)
-                    self.markups_changed.emit()
-            self._pending_markup = None
-            if self._markup_item:
-                self._markup_item.set_pending(None)
+                # A genuine press-drag-release — commit now, same as before.
+                self._commit_pending_markup()
+            # Otherwise this was just the first click of a click-then-click
+            # shape: leave it pending, live-previewing to the cursor (mouse
+            # tracking is on) until a second click finishes it.
             return
         if self._panning and event.button() == self._pan_button:
             self._panning = False
@@ -1758,13 +1793,14 @@ class OverlayViewer(QWidget):
         markup_section.addWidget(clear_markups_btn)
 
         markup_section.addWidget(QLabel(
-            "Line/Box/Cloud: drag on the drawing. Polyline: click to add each "
-            "point, double-click or Enter to finish (doesn't need to close); "
-            "Esc cancels, Backspace undoes the last point. Select: click a "
-            "markup to move it, Delete removes it. Edit (✎): drag a point to "
-            "reshape, double-click a line to add a point there, drag inside "
-            "to move the whole markup, Delete removes the selected point, "
-            "Esc/Enter finishes. Pan with right-drag.",
+            "Line/Box/Cloud: click to start, move to preview live, click "
+            "again to finish (or just drag). Polyline: click to add each "
+            "point, double-click or Enter to finish (doesn't need to close). "
+            "Esc turns the tool off. Select: click a markup to move it, "
+            "Delete removes it. Edit (✎): drag a point to reshape, "
+            "double-click a line to add a point there, drag inside to move "
+            "the whole markup, Delete removes the selected point, Esc/Enter "
+            "finishes. Pan with right-drag.",
             styleSheet="color:#666; font-size:9px;", wordWrap=True))
         right_layout.addWidget(markup_section)
 
