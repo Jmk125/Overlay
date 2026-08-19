@@ -286,6 +286,8 @@ def mask_clip_qpath(masks: list, width: float, height: float) -> QPainterPath:
     used to clip the live 'masked overlay' preview to the masked area(s)."""
     path = QPainterPath()
     for m in masks:
+        if not m.get('visible', True):
+            continue
         pts = m.get('points', [])
         if len(pts) < 3:
             continue
@@ -304,6 +306,8 @@ def mask_clip_image(masks: list, width: int, height: int) -> Image.Image:
     img = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(img)
     for m in masks:
+        if not m.get('visible', True):
+            continue
         pts = m.get('points', [])
         if len(pts) < 3:
             continue
