@@ -95,6 +95,14 @@ class RenderWorker(QThread):
                 self.done.emit(None, None, None)
 
 
+def _screen_px(painter, px: float) -> float:
+    """Scene-unit length that renders as `px` device pixels at the painter's
+    current zoom — used so selection/edit handles stay a constant size on
+    screen instead of growing or shrinking as the canvas is zoomed."""
+    scale = painter.worldTransform().m11() or 1.0
+    return px / scale
+
+
 class MarkupOverlayItem(QGraphicsItem):
     """A single scene item that paints all of a pair's markups (plus the one
     currently being drawn). Coordinates are normalized 0-1 to the canvas."""
@@ -143,9 +151,9 @@ class MarkupOverlayItem(QGraphicsItem):
             pts = [(p[0] * self._w, p[1] * self._h)
                    for p in self._markups[self._selected].get('points', [])]
             if len(pts) >= 2:
+                pad = _screen_px(painter, 8)
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
-                pad = 8
                 rect = QRectF(min(xs) - pad, min(ys) - pad,
                               (max(xs) - min(xs)) + 2 * pad,
                               (max(ys) - min(ys)) + 2 * pad)
@@ -157,9 +165,10 @@ class MarkupOverlayItem(QGraphicsItem):
                 painter.drawRect(rect)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor('#00e0ff'))
+                hs = _screen_px(painter, 3)
                 for hx, hy in [(rect.left(), rect.top()), (rect.right(), rect.top()),
                                (rect.left(), rect.bottom()), (rect.right(), rect.bottom())]:
-                    painter.drawRect(QRectF(hx - 3, hy - 3, 6, 6))
+                    painter.drawRect(QRectF(hx - hs, hy - hs, 2 * hs, 2 * hs))
 
         # The markup being reshaped in Edit mode shows its actual vertices as
         # draggable handles, regardless of its own visibility.
@@ -174,10 +183,11 @@ class MarkupOverlayItem(QGraphicsItem):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPolyline(QPolygonF(spts))
                 painter.setPen(Qt.PenStyle.NoPen)
+                r = _screen_px(painter, 5)
                 for i, p in enumerate(spts):
                     painter.setBrush(QColor('#ffdd00') if i == self._edit_selected_vertex
                                      else QColor('#00e0ff'))
-                    painter.drawEllipse(p, 5, 5)
+                    painter.drawEllipse(p, r, r)
 
 
 class MaskedOverlayItem(QGraphicsItem):
@@ -332,10 +342,11 @@ class MaskedOverlayItem(QGraphicsItem):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPolygon(QPolygonF(spts))
                 painter.setPen(Qt.PenStyle.NoPen)
+                r = _screen_px(painter, 5)
                 for i, p in enumerate(spts):
                     painter.setBrush(QColor('#ffdd00') if i == self._edit_selected_vertex
                                      else QColor('#00e0ff'))
-                    painter.drawEllipse(p, 5, 5)
+                    painter.drawEllipse(p, r, r)
 
         if not self._show_outlines:
             return
@@ -357,8 +368,9 @@ class MaskedOverlayItem(QGraphicsItem):
                 painter.drawPolyline(QPolygonF(poly_pts))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor('#ffb300'))
+            r = _screen_px(painter, 4)
             for p in poly_pts:
-                painter.drawEllipse(p, 4, 4)
+                painter.drawEllipse(p, r, r)
 
 
 class OverlayCanvas(QGraphicsView):
