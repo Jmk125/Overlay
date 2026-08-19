@@ -687,6 +687,24 @@ class OverlayCanvas(QGraphicsView):
     def _scene_to_norm(self, scene_pos) -> list:
         return [scene_pos.x() / self._canvas_w, scene_pos.y() / self._canvas_h]
 
+    def _snapped_point_norm(self, origin_norm, scene_pos) -> list:
+        """scene_pos as a normalized point, snapped to the nearest 45°
+        increment (horizontal/vertical/diagonal) from origin_norm, holding
+        the drawn length fixed. Angle is computed in canvas-pixel space so a
+        non-square page doesn't skew the snap; origin_norm is normalized."""
+        x0 = origin_norm[0] * self._canvas_w
+        y0 = origin_norm[1] * self._canvas_h
+        x1, y1 = scene_pos.x(), scene_pos.y()
+        dx, dy = x1 - x0, y1 - y0
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return self._scene_to_norm(scene_pos)
+        step = math.pi / 4
+        angle = round(math.atan2(dy, dx) / step) * step
+        sx = x0 + dist * math.cos(angle)
+        sy = y0 + dist * math.sin(angle)
+        return [sx / self._canvas_w, sy / self._canvas_h]
+
     def _select_markup(self, idx):
         self._selected_markup = idx
         if self._markup_item:
@@ -1127,7 +1145,11 @@ class OverlayCanvas(QGraphicsView):
                         self._select_last = scene_pt
                     return
                 if self._markup_tool == 'polyline':
-                    self._polyline_points.append(self._scene_to_norm(scene_pt))
+                    if self._polyline_points and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                        pt = self._snapped_point_norm(self._polyline_points[-1], scene_pt)
+                    else:
+                        pt = self._scene_to_norm(scene_pt)
+                    self._polyline_points.append(pt)
                     self._pending_markup = {
                         'type': 'polyline',
                         'points': [list(p) for p in self._polyline_points],
@@ -1139,7 +1161,11 @@ class OverlayCanvas(QGraphicsView):
                 if self._pending_markup is not None:
                     # Second click: finish a shape that was left open after a
                     # plain first click (as opposed to a press-drag-release).
-                    end = self._scene_to_norm(scene_pt)
+                    if (self._markup_tool == 'line'
+                            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                        end = self._snapped_point_norm(self._pending_markup['points'][0], scene_pt)
+                    else:
+                        end = self._scene_to_norm(scene_pt)
                     self._pending_markup['points'][1] = end
                     self._commit_pending_markup()
                     return
@@ -1212,7 +1238,11 @@ class OverlayCanvas(QGraphicsView):
             return
 
         if self._markup_tool == 'polyline' and self._polyline_points:
-            cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+            scene_pt = self.mapToScene(event.position().toPoint())
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                cur = self._snapped_point_norm(self._polyline_points[-1], scene_pt)
+            else:
+                cur = self._scene_to_norm(scene_pt)
             preview = {
                 'type': 'polyline',
                 'points': [list(p) for p in self._polyline_points] + [cur],
@@ -1225,7 +1255,11 @@ class OverlayCanvas(QGraphicsView):
             return
 
         if self._pending_markup is not None and self._markup_tool != 'polyline':
-            cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+            scene_pt = self.mapToScene(event.position().toPoint())
+            if self._markup_tool == 'line' and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                cur = self._snapped_point_norm(self._pending_markup['points'][0], scene_pt)
+            else:
+                cur = self._scene_to_norm(scene_pt)
             self._pending_markup['points'][1] = cur
             self._markup_item.set_pending(self._pending_markup)
             return
@@ -1809,7 +1843,9 @@ class OverlayViewer(QWidget):
             "Line/Box/Cloud: click to start, move to preview live, click "
             "again to finish (or just drag). Polyline: click to add each "
             "point, double-click or Enter to finish (doesn't need to close). "
-            "Esc turns the tool off. Select: click a markup to move it, "
+            "Hold Shift while drawing a Line or Polyline segment to snap it "
+            "to horizontal, vertical, or 45°. Esc turns the tool off. "
+            "Select: click a markup to move it, "
             "Delete removes it. Edit (✎): drag a point to reshape, "
             "double-click a line to add a point there, drag inside to move "
             "the whole markup, Delete removes the selected point, Esc/Enter "
