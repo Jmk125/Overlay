@@ -1211,6 +1211,19 @@ class OverlayCanvas(QGraphicsView):
             self._markup_item.set_markups(self._pair.markups)
             return
 
+        if self._markup_tool == 'polyline' and self._polyline_points:
+            cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
+            preview = {
+                'type': 'polyline',
+                'points': [list(p) for p in self._polyline_points] + [cur],
+                'color': self._markup_color,
+                'width': self._markup_width,
+            }
+            self._pending_markup = preview
+            if self._markup_item:
+                self._markup_item.set_pending(preview)
+            return
+
         if self._pending_markup is not None and self._markup_tool != 'polyline':
             cur = self._scene_to_norm(self.mapToScene(event.position().toPoint()))
             self._pending_markup['points'][1] = cur
