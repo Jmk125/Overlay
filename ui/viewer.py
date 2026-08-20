@@ -1832,8 +1832,7 @@ class OverlayViewer(QWidget):
         self.markup_width_spin.setRange(1, 20)
         self.markup_width_spin.setValue(3)
         self.markup_width_spin.setStyleSheet("background:#2a2a2a; color:#eee; border:1px solid #555;")
-        self.markup_width_spin.valueChanged.connect(
-            lambda v: self.canvas.set_markup_width(v / 1000.0))
+        self.markup_width_spin.valueChanged.connect(self._on_markup_width_spin_changed)
         cw_row.addWidget(self.markup_width_spin)
         cw_row.addStretch()
         markup_section.addLayout(cw_row)
@@ -2249,13 +2248,33 @@ class OverlayViewer(QWidget):
     def _sync_markup_ui(self):
         """Single place that keeps the Markups panel in sync with the canvas:
         the draw-tool buttons (only one of select/line/polyline/rect/cloud
-        reflects the active tool, none while editing) and the per-markup
-        list (names/order/edit-highlight)."""
+        reflects the active tool, none while editing), the per-markup list
+        (names/order/edit-highlight), and the Width control (shows the
+        markup currently being edited, if any, instead of the default)."""
         active_tool = (self.canvas._markup_tool
                       if self.canvas._mode == OverlayCanvas.MODE_MARKUP else None)
         for k, b in self.markup_btns.items():
             b.setChecked(k == active_tool)
         self._refresh_markup_list()
+
+        editing = self.canvas._markup_edit_index
+        pair = self._current_pair()
+        if editing is not None and 0 <= editing < len(pair.markups):
+            width = pair.markups[editing].get('width', 0.003)
+            self.markup_width_spin.blockSignals(True)
+            self.markup_width_spin.setValue(round(width * 1000))
+            self.markup_width_spin.blockSignals(False)
+
+    def _on_markup_width_spin_changed(self, v: int):
+        width_norm = v / 1000.0
+        editing = self.canvas._markup_edit_index
+        if editing is not None:
+            pair = self._current_pair()
+            if 0 <= editing < len(pair.markups):
+                pair.markups[editing]['width'] = width_norm
+                self.canvas.markups_updated()
+                return
+        self.canvas.set_markup_width(width_norm)
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
