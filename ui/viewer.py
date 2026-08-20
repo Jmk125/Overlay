@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSlider, QSplitter, QScrollArea, QFrame,
     QListWidget, QListWidgetItem, QDoubleSpinBox, QSpinBox,
     QFileDialog, QCheckBox, QGroupBox, QMessageBox, QSizePolicy,
-    QLineEdit, QProgressBar, QColorDialog
+    QLineEdit, QProgressBar, QColorDialog, QAbstractItemView
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QThread, QPointF, QRectF, QSizeF, QTimer
@@ -1679,11 +1679,18 @@ class OverlayViewer(QWidget):
         self.mask_section.addWidget(self.draw_mask_btn)
 
         self.mask_section.addWidget(QLabel(
-            "Masks (check to show/hide, type to rename, ✎ to reshape):",
+            "Masks (check to show/hide, type to rename, ✎ to reshape, "
+            "drag the row's left edge to reorder):",
             wordWrap=True, styleSheet="color:#888; font-size:9px;"))
         self.mask_list = QListWidget()
         self.mask_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
         self.mask_list.setFixedHeight(130)
+        # Rows are custom widgets covering nearly the whole item, so the only
+        # place left to grab for a reorder-drag is the thin native-selection
+        # strip at the item's edge — that's enough for InternalMove to work.
+        self.mask_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.mask_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.mask_list.model().rowsMoved.connect(self._on_mask_rows_moved)
         self.mask_section.addWidget(self.mask_list)
 
         clear_masks_btn = QPushButton("Clear All Masks")
@@ -1838,11 +1845,15 @@ class OverlayViewer(QWidget):
         markup_section.addLayout(cw_row)
 
         markup_section.addWidget(QLabel(
-            "Markups (check to show/hide, type to rename, ✎ to reshape):",
+            "Markups (check to show/hide, type to rename, ✎ to reshape, "
+            "drag the row's left edge to reorder):",
             wordWrap=True, styleSheet="color:#888; font-size:9px;"))
         self.markup_list = QListWidget()
         self.markup_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
         self.markup_list.setFixedHeight(130)
+        self.markup_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.markup_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.markup_list.model().rowsMoved.connect(self._on_markup_rows_moved)
         markup_section.addWidget(self.markup_list)
 
         clear_markups_btn = QPushButton("Clear All Markups")
@@ -2038,6 +2049,7 @@ class OverlayViewer(QWidget):
         self.mask_list.clear()
         for i, m in enumerate(pair.masks):
             item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, i)
             self.mask_list.addItem(item)
 
             row = QWidget()
@@ -2097,6 +2109,29 @@ class OverlayViewer(QWidget):
             item.setSizeHint(row.sizeHint())
             self.mask_list.setItemWidget(item, row)
 
+    def _on_mask_rows_moved(self, *_args):
+        """A drag-reorder finished. Each item still carries the index it had
+        before the drag (as UserRole data — that travels with the item even
+        if Qt's item-widget pairing gets confused during an internal move),
+        so read the new order back from that rather than trusting widget
+        positions, then rebuild the list cleanly from the reordered data."""
+        pair = self._current_pair()
+        order = [self.mask_list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.mask_list.count())]
+        if sorted(order) != list(range(len(pair.masks))):
+            self._refresh_mask_list()   # unexpected state — just resync
+            return
+        editing = self.canvas._mask_edit_index
+        editing_obj = pair.masks[editing] if editing is not None and 0 <= editing < len(pair.masks) else None
+        pair.masks[:] = [pair.masks[i] for i in order]
+        if editing_obj is not None:
+            new_idx = next(i for i, m in enumerate(pair.masks) if m is editing_obj)
+            self.canvas._mask_edit_index = new_idx
+            if self.canvas._mask_item:
+                self.canvas._mask_item.set_edit_index(new_idx)
+        self.canvas.masks_updated()
+        self._refresh_mask_list()
+
     def _on_mask_visible_toggled(self, index: int, checked: bool):
         pair = self._current_pair()
         if 0 <= index < len(pair.masks):
@@ -2144,6 +2179,7 @@ class OverlayViewer(QWidget):
         self.markup_list.clear()
         for i, m in enumerate(pair.markups):
             item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, i)
             self.markup_list.addItem(item)
 
             row = QWidget()
@@ -2195,6 +2231,34 @@ class OverlayViewer(QWidget):
 
             item.setSizeHint(row.sizeHint())
             self.markup_list.setItemWidget(item, row)
+
+    def _on_markup_rows_moved(self, *_args):
+        """A drag-reorder finished — see _on_mask_rows_moved for why this
+        reads the new order from each item's UserRole data rather than
+        trusting widget positions."""
+        pair = self._current_pair()
+        order = [self.markup_list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.markup_list.count())]
+        if sorted(order) != list(range(len(pair.markups))):
+            self._refresh_markup_list()
+            return
+        editing = self.canvas._markup_edit_index
+        editing_obj = (pair.markups[editing]
+                      if editing is not None and 0 <= editing < len(pair.markups) else None)
+        selected = self.canvas._selected_markup
+        selected_obj = (pair.markups[selected]
+                       if selected is not None and 0 <= selected < len(pair.markups) else None)
+        pair.markups[:] = [pair.markups[i] for i in order]
+        if editing_obj is not None:
+            new_idx = next(i for i, m in enumerate(pair.markups) if m is editing_obj)
+            self.canvas._markup_edit_index = new_idx
+            if self.canvas._markup_item:
+                self.canvas._markup_item.set_edit_index(new_idx)
+        if selected_obj is not None:
+            new_idx = next(i for i, m in enumerate(pair.markups) if m is selected_obj)
+            self.canvas._select_markup(new_idx)
+        self.canvas.markups_updated()
+        self._refresh_markup_list()
 
     def _on_markup_visible_toggled(self, index: int, checked: bool):
         pair = self._current_pair()
