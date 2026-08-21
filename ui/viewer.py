@@ -437,6 +437,9 @@ class OverlayCanvas(QGraphicsView):
         self._markup_tool = 'line'        # 'select' | 'line' | 'polyline' | 'rect' | 'cloud'
         self._markup_color = '#ff3030'
         self._markup_width = 0.003        # normalized fraction of canvas width
+        self._markup_dash = 'solid'       # 'solid' | 'dash' | 'dot' | 'dashdot' (line/polyline/rect)
+        self._markup_fill_color = None    # hex or None (rect/cloud only)
+        self._markup_fill_opacity = 0.3   # 0-1
         self._pending_markup = None
         self._selected_markup = None      # index of selected markup
         self._select_dragging = False
@@ -668,6 +671,7 @@ class OverlayCanvas(QGraphicsView):
                 'points': [list(p) for p in self._polyline_points],
                 'color': self._markup_color,
                 'width': self._markup_width,
+                'dash': self._markup_dash,
                 'visible': True,
                 'name': self._next_markup_name('polyline'),
             }
@@ -695,6 +699,15 @@ class OverlayCanvas(QGraphicsView):
 
     def set_markup_width(self, width_norm: float):
         self._markup_width = width_norm
+
+    def set_markup_dash(self, dash: str):
+        self._markup_dash = dash
+
+    def set_markup_fill_color(self, hex_color):
+        self._markup_fill_color = hex_color
+
+    def set_markup_fill_opacity(self, opacity: float):
+        self._markup_fill_opacity = opacity
 
     def _scene_to_norm(self, scene_pos) -> list:
         return [scene_pos.x() / self._canvas_w, scene_pos.y() / self._canvas_h]
@@ -895,6 +908,9 @@ class OverlayCanvas(QGraphicsView):
                        min(1.0, max(0.0, p[1] + nudge))] for p in src.get('points', [])],
             'color': src.get('color', '#ff3030'),
             'width': src.get('width', 0.003),
+            'dash': src.get('dash', 'solid'),
+            'fill_color': src.get('fill_color'),
+            'fill_opacity': src.get('fill_opacity', 0.3),
             'visible': src.get('visible', True),
             'name': f"{src.get('name') or self._next_markup_name(src.get('type'))} copy",
         }
@@ -1167,6 +1183,7 @@ class OverlayCanvas(QGraphicsView):
                         'points': [list(p) for p in self._polyline_points],
                         'color': self._markup_color,
                         'width': self._markup_width,
+                        'dash': self._markup_dash,
                     }
                     self._markup_item.set_pending(self._pending_markup)
                     return
@@ -1187,6 +1204,9 @@ class OverlayCanvas(QGraphicsView):
                     'points': [start, list(start)],
                     'color': self._markup_color,
                     'width': self._markup_width,
+                    'dash': self._markup_dash,
+                    'fill_color': self._markup_fill_color,
+                    'fill_opacity': self._markup_fill_opacity,
                     'visible': True,
                     'name': self._next_markup_name(self._markup_tool),
                 }
@@ -1260,6 +1280,7 @@ class OverlayCanvas(QGraphicsView):
                 'points': [list(p) for p in self._polyline_points] + [cur],
                 'color': self._markup_color,
                 'width': self._markup_width,
+                'dash': self._markup_dash,
             }
             self._pending_markup = preview
             if self._markup_item:
@@ -1489,6 +1510,7 @@ class OverlayViewer(QWidget):
         self._dirty = False
         self._needs_fit = True   # fit-to-window only when switching pairs
         self._markup_color = '#ff3030'   # current markup color (mirrors canvas)
+        self._markup_fill_color = None   # current fill color (mirrors canvas), None until picked
 
         self._build_ui()
 
@@ -1843,6 +1865,47 @@ class OverlayViewer(QWidget):
         cw_row.addWidget(self.markup_width_spin)
         cw_row.addStretch()
         markup_section.addLayout(cw_row)
+
+        dash_row = QHBoxLayout()
+        dash_row.addWidget(QLabel("Dash:"))
+        self.markup_dash_combo = QComboBox()
+        self.markup_dash_combo.addItem("Solid", "solid")
+        self.markup_dash_combo.addItem("Dash", "dash")
+        self.markup_dash_combo.addItem("Dot", "dot")
+        self.markup_dash_combo.addItem("Dash-Dot", "dashdot")
+        self.markup_dash_combo.setStyleSheet("background:#2a2a2a; color:#eee; border:1px solid #555;")
+        self.markup_dash_combo.currentIndexChanged.connect(self._on_markup_dash_changed)
+        dash_row.addWidget(self.markup_dash_combo)
+        dash_row.addStretch()
+        markup_section.addLayout(dash_row)
+        markup_section.addWidget(QLabel(
+            "Dash style applies to Line, Polyline, and Box.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+
+        fill_row = QHBoxLayout()
+        self.markup_fill_chk = QCheckBox("Fill:")
+        self.markup_fill_chk.toggled.connect(self._on_markup_fill_toggled)
+        fill_row.addWidget(self.markup_fill_chk)
+        self.markup_fill_color_btn = QPushButton()
+        self.markup_fill_color_btn.setFixedSize(40, 22)
+        self.markup_fill_color_btn.setEnabled(False)
+        self.markup_fill_color_btn.clicked.connect(self._pick_markup_fill_color)
+        fill_row.addWidget(self.markup_fill_color_btn)
+        fill_row.addWidget(QLabel("Opacity:"))
+        self.markup_fill_opacity_spin = QSpinBox()
+        self.markup_fill_opacity_spin.setRange(0, 100)
+        self.markup_fill_opacity_spin.setValue(30)
+        self.markup_fill_opacity_spin.setSuffix("%")
+        self.markup_fill_opacity_spin.setEnabled(False)
+        self.markup_fill_opacity_spin.setStyleSheet("background:#2a2a2a; color:#eee; border:1px solid #555;")
+        self.markup_fill_opacity_spin.valueChanged.connect(self._on_markup_fill_opacity_changed)
+        fill_row.addWidget(self.markup_fill_opacity_spin)
+        fill_row.addStretch()
+        markup_section.addLayout(fill_row)
+        markup_section.addWidget(QLabel(
+            "Fill applies to Box and Cloud.",
+            styleSheet="color:#666; font-size:9px;", wordWrap=True))
+        self._refresh_markup_fill_color_btn()
 
         markup_section.addWidget(QLabel(
             "Markups (check to show/hide, type to rename, ✎ to reshape, "
@@ -2323,11 +2386,37 @@ class OverlayViewer(QWidget):
 
         editing = self.canvas._markup_edit_index
         pair = self._current_pair()
-        if editing is not None and 0 <= editing < len(pair.markups):
-            width = pair.markups[editing].get('width', 0.003)
+        edited = (pair.markups[editing]
+                 if editing is not None and 0 <= editing < len(pair.markups) else None)
+        if edited is not None:
+            width = edited.get('width', 0.003)
             self.markup_width_spin.blockSignals(True)
             self.markup_width_spin.setValue(round(width * 1000))
             self.markup_width_spin.blockSignals(False)
+
+            dash = edited.get('dash', 'solid')
+            self.markup_dash_combo.blockSignals(True)
+            i = self.markup_dash_combo.findData(dash)
+            self.markup_dash_combo.setCurrentIndex(i if i >= 0 else 0)
+            self.markup_dash_combo.blockSignals(False)
+
+            fill_color = edited.get('fill_color')
+            self.markup_fill_chk.blockSignals(True)
+            self.markup_fill_chk.setChecked(bool(fill_color))
+            self.markup_fill_chk.blockSignals(False)
+            self._markup_fill_color = fill_color or self._markup_fill_color
+            self.markup_fill_opacity_spin.blockSignals(True)
+            self.markup_fill_opacity_spin.setValue(round(edited.get('fill_opacity', 0.3) * 100))
+            self.markup_fill_opacity_spin.blockSignals(False)
+            self._refresh_markup_fill_color_btn()
+
+        mtype = edited.get('type') if edited is not None else self.canvas._markup_tool
+        dash_ok = mtype in ('line', 'polyline', 'rect')
+        fill_ok = mtype in ('rect', 'cloud')
+        self.markup_dash_combo.setEnabled(dash_ok)
+        self.markup_fill_chk.setEnabled(fill_ok)
+        self.markup_fill_color_btn.setEnabled(fill_ok and self.markup_fill_chk.isChecked())
+        self.markup_fill_opacity_spin.setEnabled(fill_ok and self.markup_fill_chk.isChecked())
 
     def _on_markup_width_spin_changed(self, v: int):
         width_norm = v / 1000.0
@@ -2339,6 +2428,58 @@ class OverlayViewer(QWidget):
                 self.canvas.markups_updated()
                 return
         self.canvas.set_markup_width(width_norm)
+
+    def _on_markup_dash_changed(self, _index: int):
+        dash = self.markup_dash_combo.currentData()
+        editing = self.canvas._markup_edit_index
+        if editing is not None:
+            pair = self._current_pair()
+            if 0 <= editing < len(pair.markups):
+                pair.markups[editing]['dash'] = dash
+                self.canvas.markups_updated()
+                return
+        self.canvas.set_markup_dash(dash)
+
+    def _apply_markup_fill(self):
+        """Push the current fill checkbox/color/opacity controls to whatever
+        they should affect: the markup being edited, or the draw defaults."""
+        fill_color = self._markup_fill_color if self.markup_fill_chk.isChecked() else None
+        opacity = self.markup_fill_opacity_spin.value() / 100.0
+        editing = self.canvas._markup_edit_index
+        if editing is not None:
+            pair = self._current_pair()
+            if 0 <= editing < len(pair.markups):
+                pair.markups[editing]['fill_color'] = fill_color
+                pair.markups[editing]['fill_opacity'] = opacity
+                self.canvas.markups_updated()
+                return
+        self.canvas.set_markup_fill_color(fill_color)
+        self.canvas.set_markup_fill_opacity(opacity)
+
+    def _on_markup_fill_toggled(self, checked: bool):
+        self.markup_fill_color_btn.setEnabled(checked)
+        self.markup_fill_opacity_spin.setEnabled(checked)
+        if checked and not self._markup_fill_color:
+            self._markup_fill_color = self._markup_color
+            self._refresh_markup_fill_color_btn()
+        self._apply_markup_fill()
+
+    def _pick_markup_fill_color(self):
+        c = QColorDialog.getColor(QColor(self._markup_fill_color or self._markup_color),
+                                  self, "Fill Color")
+        if c.isValid():
+            self._markup_fill_color = c.name()
+            self._refresh_markup_fill_color_btn()
+            if self.markup_fill_chk.isChecked():
+                self._apply_markup_fill()
+
+    def _on_markup_fill_opacity_changed(self, _v: int):
+        self._apply_markup_fill()
+
+    def _refresh_markup_fill_color_btn(self):
+        color = self._markup_fill_color or self._markup_color
+        self.markup_fill_color_btn.setStyleSheet(
+            f"background:{color}; border:1px solid #777; border-radius:3px;")
 
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]

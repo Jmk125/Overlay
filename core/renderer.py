@@ -237,6 +237,19 @@ def cloud_path(rect: QRectF, bump: float) -> QPainterPath:
     return path
 
 
+# Dash-style names -> Qt pen styles. Only applied to line/polyline/rect.
+DASH_STYLES = {
+    'solid': Qt.PenStyle.SolidLine,
+    'dash': Qt.PenStyle.DashLine,
+    'dot': Qt.PenStyle.DotLine,
+    'dashdot': Qt.PenStyle.DashDotLine,
+}
+
+# Markup types that support a dash/dot line style vs. a fill color.
+DASH_CAPABLE_TYPES = ('line', 'polyline', 'rect')
+FILL_CAPABLE_TYPES = ('rect', 'cloud')
+
+
 def paint_markups(painter: QPainter, markups: list, width: int, height: int):
     """Draw a list of normalized markups onto a QPainter sized width×height."""
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -246,13 +259,21 @@ def paint_markups(painter: QPainter, markups: list, width: int, height: int):
         pts = [(p[0] * width, p[1] * height) for p in m.get('points', [])]
         if len(pts) < 2:
             continue
+        mtype = m.get('type', 'line')
         pen = QPen(QColor(m.get('color', '#ff0000')))
         pen.setWidthF(max(1.0, float(m.get('width', 0.003)) * width))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        if mtype in DASH_CAPABLE_TYPES:
+            pen.setStyle(DASH_STYLES.get(m.get('dash', 'solid'), Qt.PenStyle.SolidLine))
         painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        mtype = m.get('type', 'line')
+        fill_color = m.get('fill_color')
+        if mtype in FILL_CAPABLE_TYPES and fill_color:
+            c = QColor(fill_color)
+            c.setAlpha(max(0, min(255, int(round(float(m.get('fill_opacity', 0.3)) * 255)))))
+            painter.setBrush(QBrush(c))
+        else:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
         if mtype == 'line':
             painter.drawLine(QPointF(*pts[0]), QPointF(*pts[1]))
         elif mtype == 'polyline':
