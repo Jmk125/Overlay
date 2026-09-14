@@ -294,12 +294,18 @@ class MaskedOverlayItem(QGraphicsItem):
         # shapes over a different view (see set_show_outlines below, which
         # covers that case independently).
         if self._show_content:
+            # Color masks paint a flat fill and are handled separately below,
+            # on top of everything else — they replace their box's content
+            # outright rather than revealing a drawing through it, so they
+            # stay out of the "window" masks' reveal/cutout logic.
+            window_masks = [m for m in self._masks if m.get('type') != 'color']
+            color_masks = [m for m in self._masks if m.get('type') == 'color']
             if self._cutout:
                 # Each mask can override its own reveal color, so clip and
                 # draw them one at a time (rather than one shared union-clip
                 # draw) — a plain mask uses the pair's default other_pixmap,
                 # a colored one uses its cached tint.
-                for m in self._masks:
+                for m in window_masks:
                     if not m.get('visible', True):
                         continue
                     sub_path = R.mask_clip_qpath([m], self._w, self._h)
@@ -322,12 +328,22 @@ class MaskedOverlayItem(QGraphicsItem):
                     painter.drawPixmap(0, 0, pixmap)
                     painter.restore()
             elif self._composite_pixmap:
-                path = R.mask_clip_qpath(self._masks, self._w, self._h)
+                path = R.mask_clip_qpath(window_masks, self._w, self._h)
                 if not path.isEmpty():
                     painter.save()
                     painter.setClipPath(path)   # clip stays fixed in canvas coords
                     painter.drawPixmap(0, 0, self._composite_pixmap)
                     painter.restore()
+
+            for m in color_masks:
+                if not m.get('visible', True):
+                    continue
+                sub_path = R.mask_clip_qpath([m], self._w, self._h)
+                if sub_path.isEmpty():
+                    continue
+                painter.save()
+                painter.fillPath(sub_path, QColor(m.get('color') or '#ff0000'))
+                painter.restore()
 
         # The mask being reshaped in Edit mode always shows its handles,
         # regardless of whether outline previews are otherwise on.
@@ -455,6 +471,7 @@ class OverlayCanvas(QGraphicsView):
         self._mask_edit_index = None      # index of the mask being reshaped
         self._mask_edit_selected = None   # index of its selected vertex
         self._mask_edit_drag = None       # ('vertex', idx) or ('shape', last_scene_pos)
+        self._drawing_color_mask = False  # MODE_MASK is drawing a color mask, not a window one
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # receive Delete key
 
@@ -1426,11 +1443,16 @@ class OverlayCanvas(QGraphicsView):
         """Close the in-progress polygon (needs >= 3 points) into a new mask,
         then stop drawing — a fresh click on Draw Mask starts a separate one."""
         if self._pair is not None and len(self._mask_points) >= 3:
-            self._pair.masks.append({
+            mask = {
                 'points': [list(p) for p in self._mask_points],
                 'visible': True,
                 'name': f'Mask {len(self._pair.masks) + 1}',
-            })
+            }
+            if self._drawing_color_mask:
+                mask['type'] = 'color'
+                mask['color'] = '#ff0000'
+                mask['name'] = f'Color Mask {len(self._pair.masks) + 1}'
+            self._pair.masks.append(mask)
             if self._mask_item:
                 self._mask_item.set_masks(self._pair.masks)
             self.masks_changed.emit()
@@ -1438,6 +1460,7 @@ class OverlayCanvas(QGraphicsView):
 
     def mask_cancel_pending(self):
         self._mask_points = []
+        self._drawing_color_mask = False
         if self._mask_item:
             self._mask_item.set_pending_points([])
 
@@ -1465,6 +1488,7 @@ class OverlayCanvas(QGraphicsView):
                        min(1.0, max(0.0, p[1] + nudge))] for p in src.get('points', [])],
             'visible': src.get('visible', True),
             'color': src.get('color'),
+            'type': src.get('type'),
             'name': f"{src.get('name') or f'Mask {index + 1}'} copy",
         }
         self._pair.masks.insert(index + 1, copy)
@@ -1699,6 +1723,13 @@ class OverlayViewer(QWidget):
         self.draw_mask_btn.setStyleSheet(self._toggle_btn_style())
         self.draw_mask_btn.clicked.connect(self._toggle_mask_draw)
         self.mask_section.addWidget(self.draw_mask_btn)
+
+        self.draw_color_mask_btn = QPushButton(
+            "🎨 Draw Color Mask (click points, double-click/Enter to close)")
+        self.draw_color_mask_btn.setCheckable(True)
+        self.draw_color_mask_btn.setStyleSheet(self._toggle_btn_style())
+        self.draw_color_mask_btn.clicked.connect(self._toggle_color_mask_draw)
+        self.mask_section.addWidget(self.draw_color_mask_btn)
 
         self.mask_section.addWidget(QLabel(
             "Masks (check to show/hide, type to rename, ✎ to reshape, "
@@ -2131,19 +2162,23 @@ class OverlayViewer(QWidget):
                 lambda idx=i, w=name_edit: self._on_mask_renamed(idx, w.text()))
             row_layout.addWidget(name_edit, 1)
 
-            default_color = (self.overlay_set.color_b if pair.mask_base == 'a'
-                             else self.overlay_set.color_a)
+            is_color_mask = m.get('type') == 'color'
+            default_color = ('#ff0000' if is_color_mask else
+                             (self.overlay_set.color_b if pair.mask_base == 'a'
+                              else self.overlay_set.color_a))
             color_btn = QPushButton()
             color_btn.setFixedSize(20, 22)
             color_btn.setToolTip(
+                "Fill color for this color mask." if is_color_mask else
                 "Cutout reveal color for this mask (only visible with Cutout on). "
                 "Right-click to reset to the default color.")
             color_btn.setStyleSheet(
                 f"background:{m.get('color') or default_color}; border:1px solid #777; border-radius:3px;")
             color_btn.clicked.connect(lambda _, idx=i: self._pick_mask_color(idx))
-            color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            color_btn.customContextMenuRequested.connect(
-                lambda _, idx=i: self._reset_mask_color(idx))
+            if not is_color_mask:
+                color_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                color_btn.customContextMenuRequested.connect(
+                    lambda _, idx=i: self._reset_mask_color(idx))
             row_layout.addWidget(color_btn)
 
             edit_btn = QPushButton("✎")
@@ -2211,10 +2246,13 @@ class OverlayViewer(QWidget):
         pair = self._current_pair()
         if not (0 <= index < len(pair.masks)):
             return
-        default_color = (self.overlay_set.color_b if pair.mask_base == 'a'
-                         else self.overlay_set.color_a)
+        is_color_mask = pair.masks[index].get('type') == 'color'
+        default_color = ('#ff0000' if is_color_mask else
+                         (self.overlay_set.color_b if pair.mask_base == 'a'
+                          else self.overlay_set.color_a))
         current = pair.masks[index].get('color') or default_color
-        c = QColorDialog.getColor(QColor(current), self, "Mask Cutout Color")
+        title = "Color Mask Fill Color" if is_color_mask else "Mask Cutout Color"
+        c = QColorDialog.getColor(QColor(current), self, title)
         if c.isValid():
             pair.masks[index]['color'] = c.name()
             self.canvas.masks_updated()
@@ -2368,7 +2406,9 @@ class OverlayViewer(QWidget):
         the Draw Mask toggle, the panel's own visibility (stays up while
         actively drawing/editing even off the Masked Overlay view), and the
         per-mask list (names/order/edit-highlight)."""
-        self.draw_mask_btn.setChecked(self.canvas._mode == OverlayCanvas.MODE_MASK)
+        in_mask_mode = self.canvas._mode == OverlayCanvas.MODE_MASK
+        self.draw_mask_btn.setChecked(in_mask_mode and not self.canvas._drawing_color_mask)
+        self.draw_color_mask_btn.setChecked(in_mask_mode and self.canvas._drawing_color_mask)
         self._sync_mask_section_visibility()
         self._refresh_mask_list()
 
@@ -2736,6 +2776,19 @@ class OverlayViewer(QWidget):
 
     def _toggle_mask_draw(self):
         if self.draw_mask_btn.isChecked():
+            self.canvas._drawing_color_mask = False
+            self.canvas.set_mode(OverlayCanvas.MODE_MASK)
+            # Mask-drawing is exclusive with the align and markup tools.
+            self.move_btn.setChecked(False)
+            self.rotate_btn.setChecked(False)
+            for b in self.markup_btns.values():
+                b.setChecked(False)
+        else:
+            self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
+
+    def _toggle_color_mask_draw(self):
+        if self.draw_color_mask_btn.isChecked():
+            self.canvas._drawing_color_mask = True
             self.canvas.set_mode(OverlayCanvas.MODE_MASK)
             # Mask-drawing is exclusive with the align and markup tools.
             self.move_btn.setChecked(False)
@@ -2887,6 +2940,10 @@ class OverlayViewer(QWidget):
                               else self.overlay_set.color_b)
                 base_src = img_a if pair.mask_base == 'a' else img_b
                 base_solo = R.render_single_colored(base_src, base_color)
+                # Color masks replace their box with a flat fill outright, so
+                # they're excluded from the reveal/cutout "window" masks and
+                # painted on top separately, below.
+                window_masks = [m for m in pair.masks if m.get('type') != 'color']
                 if pair.mask_cutout:
                     # Cutout: the hole reveals the OTHER drawing alone, not
                     # the two blended together. Each mask can override the
@@ -2896,20 +2953,21 @@ class OverlayViewer(QWidget):
                                            else self.overlay_set.color_a)
                     other_src = img_b if pair.mask_base == 'a' else img_a
                     colors_needed = {None: default_other_color}
-                    for m in pair.masks:
+                    for m in window_masks:
                         if m.get('visible', True) and m.get('color'):
                             colors_needed[m['color']] = m['color']
                     other_by_color = {key: R.render_single_colored(other_src, color)
                                       for key, color in colors_needed.items()}
-                    content = R.composite_masked_cutout(base_solo, other_by_color, pair.masks,
+                    content = R.composite_masked_cutout(base_solo, other_by_color, window_masks,
                                                          img_a.width, img_a.height)
                 else:
                     inside = R.composite_overlay(img_a, img_b,
                                                   self.overlay_set.color_a,
                                                   self.overlay_set.color_b,
                                                   shared_color=self.overlay_set.shared_color)
-                    content = R.composite_masked(inside, base_solo, pair.masks,
+                    content = R.composite_masked(inside, base_solo, window_masks,
                                                   img_a.width, img_a.height)
+                content = R.composite_color_masks(content, pair.masks, img_a.width, img_a.height)
             else:
                 content = R.composite_overlay(img_a, img_b,
                                                self.overlay_set.color_a,

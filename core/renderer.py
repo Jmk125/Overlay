@@ -392,6 +392,28 @@ def composite_masked_cutout(base_img: Image.Image, other_by_color: dict,
     return result
 
 
+def composite_color_masks(base_img: Image.Image, masks: list, width: int, height: int) -> Image.Image:
+    """Paint each color-type mask as a flat, opaque fill on top of `base_img`.
+
+    Backs color masks in the 'Masked Overlay' view/export: unlike a regular
+    mask (which reveals a drawing inside its box), a color mask replaces its
+    box outright with a solid color.
+    """
+    result = base_img.convert("RGBA")
+    if result.size != (width, height):
+        result = result.resize((width, height))
+    draw = ImageDraw.Draw(result)
+    for m in masks:
+        if not m.get('visible', True) or m.get('type') != 'color':
+            continue
+        pts = m.get('points', [])
+        if len(pts) < 3:
+            continue
+        draw.polygon([(p[0] * width, p[1] * height) for p in pts],
+                     fill=QColor(m.get('color') or '#ff0000').getRgb())
+    return result
+
+
 def get_page_count(pdf_path: str) -> int:
     doc = fitz.open(pdf_path)
     count = len(doc)
