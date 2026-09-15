@@ -250,8 +250,19 @@ DASH_CAPABLE_TYPES = ('line', 'polyline', 'rect')
 FILL_CAPABLE_TYPES = ('rect', 'cloud')
 
 
+HIGHLIGHT_TYPES = ('highlight_rect', 'highlight_poly')
+
+
 def paint_markups(painter: QPainter, markups: list, width: int, height: int):
-    """Draw a list of normalized markups onto a QPainter sized width×height."""
+    """Draw a list of normalized markups onto a QPainter sized width×height.
+
+    A committed Highlight markup isn't drawn here at all — it recolors the
+    drawing's own ink in place (see apply_highlight_markups) rather than
+    painting a shape on top, so callers exclude it from `markups` once it's
+    committed. The one still in progress (being dragged/clicked out) is
+    passed through as a plain dashed outline preview, same as any other
+    pending shape.
+    """
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     for m in markups:
         if not m.get('visible', True):
@@ -266,6 +277,8 @@ def paint_markups(painter: QPainter, markups: list, width: int, height: int):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         if mtype in DASH_CAPABLE_TYPES:
             pen.setStyle(DASH_STYLES.get(m.get('dash', 'solid'), Qt.PenStyle.SolidLine))
+        elif mtype in HIGHLIGHT_TYPES:
+            pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
         fill_color = m.get('fill_color')
         if mtype in FILL_CAPABLE_TYPES and fill_color:
@@ -282,12 +295,20 @@ def paint_markups(painter: QPainter, markups: list, width: int, height: int):
             for p in pts[1:]:
                 path.lineTo(*p)
             painter.drawPath(path)
-        elif mtype == 'rect':
+        elif mtype == 'rect' or mtype == 'highlight_rect':
             painter.drawRect(QRectF(QPointF(*pts[0]), QPointF(*pts[1])).normalized())
         elif mtype == 'cloud':
             rect = QRectF(QPointF(*pts[0]), QPointF(*pts[1])).normalized()
             bump = max(6.0, min(rect.width(), rect.height()) * 0.12)
             painter.drawPath(cloud_path(rect, bump))
+        elif mtype == 'highlight_poly':
+            path = QPainterPath()
+            path.moveTo(*pts[0])
+            for p in pts[1:]:
+                path.lineTo(*p)
+            if len(pts) >= 3:
+                path.closeSubpath()
+            painter.drawPath(path)
 
 
 def render_markups_pil(markups: list, width: int, height: int) -> Image.Image:
@@ -435,6 +456,44 @@ def composite_color_masks(base_img: Image.Image, ink_img: Image.Image,
         if len(pts) < 3:
             continue
         clip = mask_clip_image([m], width, height)
+        combined = ImageChops.multiply(clip, ink_alpha)
+        tint = Image.new("RGBA", (width, height), QColor(m.get('color') or '#ff0000').getRgb())
+        result = Image.composite(tint, result, combined)
+    return result
+
+
+def _highlight_clip_image(m: dict, width: int, height: int) -> Image.Image:
+    """Like mask_clip_image, but also accepts a 2-point 'highlight_rect'
+    (its two corners in either order) alongside a closed polygon."""
+    img = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(img)
+    pts = m.get('points', [])
+    if m.get('type') == 'highlight_rect' and len(pts) >= 2:
+        x0, y0 = pts[0]
+        x1, y1 = pts[1]
+        draw.rectangle([min(x0, x1) * width, min(y0, y1) * height,
+                        max(x0, x1) * width, max(y0, y1) * height], fill=255)
+    elif len(pts) >= 3:
+        draw.polygon([(p[0] * width, p[1] * height) for p in pts], fill=255)
+    return img
+
+
+def apply_highlight_markups(content: Image.Image, markups: list, width: int, height: int) -> Image.Image:
+    """Recolor `content`'s own ink to each Highlight markup's color, within
+    that markup's box/polygon — the Highlight tool relabels linework that's
+    already there rather than drawing a new shape on top of it. Blank paper
+    inside the box is left untouched.
+    """
+    highlights = [m for m in markups
+                 if m.get('visible', True) and m.get('type') in HIGHLIGHT_TYPES]
+    if not highlights:
+        return content
+    result = content.convert("RGBA")
+    if result.size != (width, height):
+        result = result.resize((width, height))
+    ink_alpha = result.split()[3]
+    for m in highlights:
+        clip = _highlight_clip_image(m, width, height)
         combined = ImageChops.multiply(clip, ink_alpha)
         tint = Image.new("RGBA", (width, height), QColor(m.get('color') or '#ff0000').getRgb())
         result = Image.composite(tint, result, combined)
