@@ -365,7 +365,12 @@ class PageSelectorDialog(QDialog):
         self.loader = ThumbnailLoader(self.pdf_path, self.page_count)
         self.loader.thumbnail_ready.connect(self._on_thumbnail)
         self.loader.progress.connect(self._on_thumbnail_progress)
-        self.loader.finished.connect(lambda: self.load_prev_btn.setText("Previews loaded"))
+        self.loader.finished.connect(self._on_thumbnails_finished)
+        # The loader is an unparented QThread, so it can outlive this dialog
+        # (e.g. closed before it finishes, or torn down along with a parent
+        # screen). Cancel it as soon as this dialog goes away, whichever
+        # happens first, so it stops touching widgets that no longer exist.
+        self.destroyed.connect(self.loader.cancel)
         self.loader.start()
 
     def closeEvent(self, event):
@@ -375,12 +380,26 @@ class PageSelectorDialog(QDialog):
         super().closeEvent(event)
 
     def _on_thumbnail_progress(self, done: int, total: int):
-        self.load_prev_btn.setText(f"Loading previews… {done}/{total}")
+        # A signal emitted just before cancellation can still be delivered
+        # after this dialog (and its widgets) have been destroyed.
+        try:
+            self.load_prev_btn.setText(f"Loading previews… {done}/{total}")
+        except RuntimeError:
+            pass
 
     def _on_thumbnail(self, index: int, pil_img):
-        if index < len(self.thumb_widgets):
-            # Convert to QPixmap on the GUI thread (thread-safe).
-            self.thumb_widgets[index].set_pixmap(R.pil_to_qpixmap(pil_img))
+        try:
+            if index < len(self.thumb_widgets):
+                # Convert to QPixmap on the GUI thread (thread-safe).
+                self.thumb_widgets[index].set_pixmap(R.pil_to_qpixmap(pil_img))
+        except RuntimeError:
+            pass
+
+    def _on_thumbnails_finished(self):
+        try:
+            self.load_prev_btn.setText("Previews loaded")
+        except RuntimeError:
+            pass
 
     def _set_all(self, state: bool):
         for w in self.thumb_widgets:

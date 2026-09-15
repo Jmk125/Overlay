@@ -286,9 +286,10 @@ class MatchingScreen(QWidget):
         root.addWidget(title)
 
         desc = QLabel(
-            "Match sheets one of three ways: OCR the sheet number (draw a box "
-            "below), match by PDF page order, or pair them manually. Unread "
-            "sheets land in the queue below — click one to re-draw its box."
+            "Match sheets one of four ways: OCR the sheet number (draw a box "
+            "below), match by each PDF's own page label, match by PDF page "
+            "order, or pair them manually. Unread sheets land in the queue "
+            "below — click one to re-draw its box."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -379,6 +380,18 @@ class MatchingScreen(QWidget):
         or_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         or_label.setStyleSheet("color: #666; font-size: 10px;")
         right_col.addWidget(or_label)
+
+        # Match by each PDF's own page label (set in Acrobat/Bluebeam), for
+        # sets that were already scanned and labeled to correspond
+        page_label_btn = QPushButton("🏷  Match by Page Label")
+        page_label_btn.setFixedHeight(34)
+        page_label_btn.setStyleSheet(self._btn_style("#2a4a6b", "#3a6491"))
+        page_label_btn.setToolTip(
+            "Use each PDF's own page labels (Acrobat/Bluebeam “Page "
+            "Labels”, not just physical page order) — handy if both sets "
+            "were already scanned and labeled to match.")
+        page_label_btn.clicked.connect(self._match_by_page_label)
+        right_col.addWidget(page_label_btn)
 
         # Match by PDF page order (1st A ↔ 1st B, 2nd ↔ 2nd, …)
         page_order_btn = QPushButton("⇅  Match by Page Order")
@@ -574,6 +587,40 @@ class MatchingScreen(QWidget):
         self._refresh_matched_list()
         self._refresh_unmatched_lists()
         self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
+
+    def _match_by_page_label(self):
+        """Pair sheets using each PDF's own page labels (Acrobat/Bluebeam
+        "Page Labels"), for sets already scanned and labeled to correspond.
+        Any page with no label defined drops into the unmatched queue."""
+        label_cache = {}
+
+        def label_for(page: DrawingPage) -> str:
+            if page.pdf_path not in label_cache:
+                try:
+                    label_cache[page.pdf_path] = R.get_page_labels(page.pdf_path)
+                except Exception:
+                    label_cache[page.pdf_path] = []
+            labels = label_cache[page.pdf_path]
+            if 0 <= page.page_index < len(labels):
+                return labels[page.page_index].strip()
+            return ""
+
+        found_any = False
+        for page in self.pages_a + self.pages_b:
+            label = label_for(page)
+            if label:
+                found_any = True
+                page.sheet_number = label
+
+        if not found_any:
+            QMessageBox.information(
+                self, "No Page Labels Found",
+                "Neither PDF has page labels set (Acrobat/Bluebeam's "
+                "“Page Labels”, not the same as page numbers).\n\n"
+                "Try OCR or Match by Page Order instead.")
+            return
+
+        self._do_matching()
 
     def _match_by_page_order(self):
         """Pair sheets by position: 1st of A ↔ 1st of B, 2nd ↔ 2nd, … Any
