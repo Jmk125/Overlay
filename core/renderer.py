@@ -430,6 +430,74 @@ def get_page_count(pdf_path: str) -> int:
     return count
 
 
+_ROMAN_NUMERALS = [
+    (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
+    (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
+    (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I'),
+]
+
+
+def _to_roman(n: int) -> str:
+    out = []
+    for value, sym in _ROMAN_NUMERALS:
+        count, n = divmod(n, value)
+        out.append(sym * count)
+    return ''.join(out)
+
+
+def _to_alpha(n: int) -> str:
+    # PDF's alpha style repeats letters past 26 (1->a, 26->z, 27->aa, 52->zz, 53->aaa).
+    letters, reps = divmod(n - 1, 26)
+    return chr(ord('a') + reps) * (letters + 1)
+
+
+def _format_page_label(style: str, prefix: str, num: int) -> str:
+    prefix = prefix or ''
+    digits = {
+        'D': str(num),
+        'r': _to_roman(num).lower(),
+        'R': _to_roman(num),
+        'a': _to_alpha(num),
+        'A': _to_alpha(num).upper(),
+    }.get(style, '')
+    return prefix + digits
+
+
+def get_page_labels(pdf_path: str) -> list:
+    """Return each page's PDF page label (the custom numbering set in Acrobat/
+    Bluebeam via Page Thumbnails -> Page Labels), not just its physical index.
+
+    Useful when two drawing sets were scanned and labeled to match — matching
+    on these avoids relying on OCR or on both sets having identical page order.
+    Pages with no label defined come back as ''. If the PDF has no page-label
+    rules at all, every entry is ''.
+    """
+    doc = fitz.open(pdf_path)
+    try:
+        n = len(doc)
+        try:
+            rules = doc.get_page_labels()
+        except Exception:
+            rules = []
+        labels = [''] * n
+        if not rules:
+            return labels
+        rules = sorted(rules, key=lambda r: r.get('startpage', 0))
+        for i, rule in enumerate(rules):
+            start = rule.get('startpage', 0)
+            if start >= n:
+                continue
+            end = rules[i + 1].get('startpage', n) if i + 1 < len(rules) else n
+            first = rule.get('firstpagenum', 1) or 1
+            for p in range(max(start, 0), min(end, n)):
+                labels[p] = _format_page_label(
+                    rule.get('style', ''), rule.get('prefix', ''), first + (p - start)
+                )
+        return labels
+    finally:
+        doc.close()
+
+
 def render_thumbnail(pdf_path: str, page_index: int, max_size: int = 200) -> QPixmap:
     """Render a small thumbnail for the matching UI"""
     doc = fitz.open(pdf_path)
