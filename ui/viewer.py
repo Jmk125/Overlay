@@ -49,10 +49,30 @@ class RenderWorker(QThread):
         try:
             if self.cancelled:
                 return
-            img_a = R.render_page(self.pair.page_a.pdf_path, self.pair.page_a.page_index, dpi)
+            pair = self.pair
+
+            # A drawing that exists in only one set (included for full-set
+            # review) has nothing to overlay against — just render that one
+            # side, in its set's color, as both the solo view and "composite".
+            if pair.is_partial:
+                page = pair.page_a or pair.page_b
+                color = self.overlay_set.color_a if pair.page_a else self.overlay_set.color_b
+                img = R.render_page(page.pdf_path, page.page_index, dpi)
+                if self.cancelled:
+                    return
+                solo = R.render_single_colored(img, color)
+                if self.cancelled:
+                    return
+                pix_solo = R.pil_to_qpixmap(solo)
+                pix_a = pix_solo if pair.page_a else None
+                pix_b = pix_solo if pair.page_b else None
+                self.done.emit(pix_a, pix_b, pix_solo)
+                return
+
+            img_a = R.render_page(pair.page_a.pdf_path, pair.page_a.page_index, dpi)
             if self.cancelled:
                 return
-            img_b_raw = R.render_page(self.pair.page_b.pdf_path, self.pair.page_b.page_index, dpi)
+            img_b_raw = R.render_page(pair.page_b.pdf_path, pair.page_b.page_index, dpi)
             if self.cancelled:
                 return
 
@@ -62,10 +82,10 @@ class RenderWorker(QThread):
             # Apply transforms to B (only needed for the flattened composite)
             img_b = R.apply_transform(
                 img_b_raw,
-                self.pair.offset_x, self.pair.offset_y,
-                self.pair.rotation,
-                self.pair.pivot_x, self.pair.pivot_y,
-                self.pair.scale_factor,
+                pair.offset_x, pair.offset_y,
+                pair.rotation,
+                pair.pivot_x, pair.pivot_y,
+                pair.scale_factor,
                 canvas_size
             )
 
@@ -1604,8 +1624,7 @@ class OverlayViewer(QWidget):
         self.pair_list = QListWidget()
         self.pair_list.setStyleSheet("background: #1e1e1e; color: #ddd; border: 1px solid #444;")
         for pair in self.overlay_set.pairs:
-            label = pair.page_a.sheet_number or pair.pair_id
-            self.pair_list.addItem(label)
+            self.pair_list.addItem(self._pair_list_item(pair))
         self.pair_list.currentRowChanged.connect(self._load_pair)
         left_layout.addWidget(self.pair_list)
 
@@ -1784,7 +1803,7 @@ class OverlayViewer(QWidget):
         self.mask_section.setVisible(False)   # only relevant in the mask view
 
         # Align section
-        align_section = CollapsibleSection("Align Drawing B", collapsed=True)
+        self.align_section = align_section = CollapsibleSection("Align Drawing B", collapsed=True)
         self.move_btn = QPushButton("↕  Move (click & drag)")
         self.move_btn.setCheckable(True)
         self.move_btn.setStyleSheet(self._toggle_btn_style())
@@ -1803,7 +1822,7 @@ class OverlayViewer(QWidget):
         right_layout.addWidget(align_section)
 
         # Rotation section
-        rot_section = CollapsibleSection("Rotation (Drawing B)", collapsed=True)
+        self.rot_section = rot_section = CollapsibleSection("Rotation (Drawing B)", collapsed=True)
         quick_row = QHBoxLayout()
         for label, angle in [('90°', 90), ('180°', 180), ('270°', 270), ('45°', 45), ('-45°', -45)]:
             btn = QPushButton(label)
@@ -1854,7 +1873,7 @@ class OverlayViewer(QWidget):
         right_layout.addWidget(rot_section)
 
         # Scale section
-        scale_section = CollapsibleSection("Scale", collapsed=True)
+        self.scale_section = scale_section = CollapsibleSection("Scale", collapsed=True)
         scale_section.addWidget(QLabel("Set A scale:"))
         self.scale_a_combo = QComboBox()
         self.scale_a_combo.addItems(COMMON_SCALES)
@@ -2117,7 +2136,28 @@ class OverlayViewer(QWidget):
         else:
             self._do_render()
 
+    def _update_partial_pair_controls(self, pair: OverlayPair):
+        """A single-sided pair (a drawing unique to one set, included for
+        full-set review) has nothing to align, rotate, scale or mask
+        against — grey out those tools and keep the view off a side that
+        doesn't exist."""
+        partial = pair.is_partial
+        self.view_btns['a'].setEnabled(pair.page_a is not None)
+        self.view_btns['b'].setEnabled(pair.page_b is not None)
+        self.view_btns['mask'].setEnabled(not partial)
+        self.align_section.setEnabled(not partial)
+        self.rot_section.setEnabled(not partial)
+        self.scale_section.setEnabled(not partial)
+        if partial and self.canvas._mode in (OverlayCanvas.MODE_MOVE, OverlayCanvas.MODE_ROTATE):
+            self.canvas.set_mode(OverlayCanvas.MODE_VIEW)
+            self.move_btn.setChecked(False)
+            self.rotate_btn.setChecked(False)
+        if partial and self._current_view_mode() != 'composite':
+            self._set_view('composite')
+
     def _update_controls_from_pair(self, pair: OverlayPair):
+        self._update_partial_pair_controls(pair)
+
         self.rot_spin.blockSignals(True)
         self.rot_spin.setValue(pair.rotation)
         self.rot_spin.blockSignals(False)
@@ -2546,6 +2586,24 @@ class OverlayViewer(QWidget):
     def _current_pair(self) -> OverlayPair:
         return self.overlay_set.pairs[self.current_pair_index]
 
+    def _pair_list_item(self, pair: OverlayPair) -> QListWidgetItem:
+        """Build the left-pane list entry for one pair, flagging a
+        single-sided entry (a drawing that only exists in one set) so it
+        reads differently from a real match."""
+        sheet = ((pair.page_a.sheet_number if pair.page_a else None)
+                 or (pair.page_b.sheet_number if pair.page_b else None)
+                 or pair.pair_id)
+        item = QListWidgetItem()
+        if pair.page_b is None:
+            item.setText(f"{sheet}   ⚠ {self.overlay_set.set_a_label} only")
+            item.setForeground(QColor('#FFD700'))
+        elif pair.page_a is None:
+            item.setText(f"{sheet}   ⚠ {self.overlay_set.set_b_label} only")
+            item.setForeground(QColor('#FFD700'))
+        else:
+            item.setText(sheet)
+        return item
+
     # ── Rendering, caching & background prefetch ──────────────────
     def _pair_sig(self, pair: OverlayPair) -> tuple:
         """A signature of everything the rendered composite depends on. Two
@@ -2755,6 +2813,17 @@ class OverlayViewer(QWidget):
         self._do_render()
 
     def _set_view(self, mode: str):
+        if self.overlay_set.pairs and mode != 'composite':
+            # A single-sided pair has no content on the missing side (and
+            # nothing to mask) — refuse a view that would show it, whether
+            # requested via a (disabled) button or the 1/2/3/4 shortcuts.
+            pair = self._current_pair()
+            if mode == 'a' and pair.page_a is None:
+                return
+            if mode == 'b' and pair.page_b is None:
+                return
+            if mode == 'mask' and pair.is_partial:
+                return
         for k, btn in self.view_btns.items():
             btn.setChecked(k == mode)
         self.canvas.set_view_mode(mode)
@@ -2926,12 +2995,16 @@ class OverlayViewer(QWidget):
     def _export(self, fmt: str):
         pair = self._current_pair()
         view_mode = self._current_view_mode()
+        partial = pair.is_partial
+        sheet = ((pair.page_a.sheet_number if pair.page_a else None)
+                 or (pair.page_b.sheet_number if pair.page_b else None)
+                 or 'sheet')
         name_part = {
             'a': self.overlay_set.set_a_label,
             'b': self.overlay_set.set_b_label,
             'mask': 'masked_overlay',
         }.get(view_mode, 'overlay')
-        default_name = f"{name_part}_{pair.page_a.sheet_number or 'sheet'}.{fmt}".replace(' ', '_')
+        default_name = f"{name_part}_{sheet}.{fmt}".replace(' ', '_')
         path, _ = QFileDialog.getSaveFileName(
             self, f"Export {fmt.upper()}",
             os.path.join(self.settings.get('export_path', ''), default_name),
@@ -2942,9 +3015,33 @@ class OverlayViewer(QWidget):
 
         try:
             # Re-render at export quality (independent of the on-screen DPI).
+            dpi = getattr(self.overlay_set, 'export_dpi', None) or self.overlay_set.render_dpi
+
+            if partial:
+                # Single-sided (drawing unique to one set) — nothing to
+                # overlay against, so just export that one drawing.
+                page = pair.page_a or pair.page_b
+                color = self.overlay_set.color_a if pair.page_a else self.overlay_set.color_b
+                img = R.render_page(page.pdf_path, page.page_index, dpi)
+                content = R.render_single_colored(img, color)
+                bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
+                bg.paste(content, mask=content)
+                final = bg.convert("RGB")
+                if self.include_markups_chk.isChecked() and pair.markups:
+                    W, H = final.size
+                    mk = R.render_markups_pil(pair.markups, W, H)
+                    final = final.convert("RGBA")
+                    final.alpha_composite(mk)
+                    final = final.convert("RGB")
+                if fmt == 'png':
+                    final.save(path)
+                elif fmt == 'pdf':
+                    final.save(path, "PDF", resolution=dpi)
+                self.render_status.setText(f"Exported to {os.path.basename(path)}")
+                return
+
             # Export exactly what's currently shown: solo A/B for those views,
             # the full overlay only for the composite/mask views.
-            dpi = getattr(self.overlay_set, 'export_dpi', None) or self.overlay_set.render_dpi
             img_a = R.render_page(pair.page_a.pdf_path, pair.page_a.page_index, dpi)
             img_b = None
             if view_mode != 'a':

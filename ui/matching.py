@@ -8,7 +8,7 @@ Sheet Matching Screen
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QSplitter, QFrame, QProgressBar,
-    QScrollArea, QMessageBox, QLineEdit, QDialog
+    QScrollArea, QMessageBox, QLineEdit, QDialog, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot, QRectF, QPointF, QTimer
 from PyQt6.QtGui import QFont, QPixmap, QPainter, QPen, QColor, QBrush, QCursor
@@ -475,6 +475,14 @@ class MatchingScreen(QWidget):
         self.matched_list.setMaximumHeight(140)
         root.addWidget(self.matched_list)
 
+        # Include unmatched drawings in the overlay (for a full-set review)
+        self.include_unmatched_chk = QCheckBox(
+            "Include unmatched drawings in the overlay (full set review — "
+            "each shows alone, flagged as A-only/B-only)")
+        self.include_unmatched_chk.setStyleSheet("color: #ccc;")
+        self.include_unmatched_chk.toggled.connect(self._update_proceed_enabled)
+        root.addWidget(self.include_unmatched_chk)
+
         # Proceed button
         self.proceed_btn = QPushButton("Continue to Overlay Viewer  ▶")
         self.proceed_btn.setFixedHeight(42)
@@ -586,7 +594,7 @@ class MatchingScreen(QWidget):
         self.unmatched_b = [p for p in self.unmatched_b if id(p) not in matched_b_ids]
         self._refresh_matched_list()
         self._refresh_unmatched_lists()
-        self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
+        self._update_proceed_enabled()
 
     def _match_by_page_label(self):
         """Pair sheets using each PDF's own page labels (Acrobat/Bluebeam
@@ -638,7 +646,7 @@ class MatchingScreen(QWidget):
         self._refresh_matched_list()
         self._refresh_unmatched_lists()
         self.unmatched_frame.setVisible(bool(self.unmatched_a or self.unmatched_b))
-        self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
+        self._update_proceed_enabled()
 
     def _run_ocr(self):
         self.run_ocr_btn.setEnabled(False)
@@ -670,8 +678,7 @@ class MatchingScreen(QWidget):
         self.unmatched_b = list(self.pages_b)
         self._refresh_unmatched_lists()
         self.unmatched_frame.setVisible(True)
-        if not self.matched_pairs:
-            self.proceed_btn.setEnabled(False)
+        self._update_proceed_enabled()
 
     def _do_matching(self):
         """Match pages by sheet number"""
@@ -696,7 +703,7 @@ class MatchingScreen(QWidget):
         if self.unmatched_a or self.unmatched_b:
             self.unmatched_frame.setVisible(True)
 
-        self.proceed_btn.setEnabled(len(self.matched_pairs) > 0)
+        self._update_proceed_enabled()
 
     def _refresh_matched_list(self):
         self.matched_list.clear()
@@ -728,7 +735,7 @@ class MatchingScreen(QWidget):
         self.matched_pairs.append(OverlayPair(page_a=pa, page_b=pb))
         self._refresh_matched_list()
         self._refresh_unmatched_lists()
-        self.proceed_btn.setEnabled(True)
+        self._update_proceed_enabled()
 
     def _edit_sheet_number(self, side: str):
         lst = self.unmatched_list_a if side == 'a' else self.unmatched_list_b
@@ -743,10 +750,25 @@ class MatchingScreen(QWidget):
             self._refresh_unmatched_lists()
             self._rematch_unmatched()
 
+    def _update_proceed_enabled(self):
+        include_unmatched = self.include_unmatched_chk.isChecked()
+        has_content = bool(self.matched_pairs) or (
+            include_unmatched and (self.unmatched_a or self.unmatched_b))
+        self.proceed_btn.setEnabled(has_content)
+
     def _proceed(self):
-        self.overlay_set.pairs = self.matched_pairs
-        self.overlay_set.unmatched_a = self.unmatched_a
-        self.overlay_set.unmatched_b = self.unmatched_b
+        pairs = list(self.matched_pairs)
+        if self.include_unmatched_chk.isChecked():
+            # Single-sided entries so the reviewer sees the full set; the
+            # viewer flags each as A-only/B-only in its pairs list.
+            pairs.extend(OverlayPair(page_a=p, page_b=None) for p in self.unmatched_a)
+            pairs.extend(OverlayPair(page_a=None, page_b=p) for p in self.unmatched_b)
+            self.overlay_set.unmatched_a = []
+            self.overlay_set.unmatched_b = []
+        else:
+            self.overlay_set.unmatched_a = self.unmatched_a
+            self.overlay_set.unmatched_b = self.unmatched_b
+        self.overlay_set.pairs = pairs
         self.matching_done.emit(self.overlay_set)
 
     def _btn_style(self, bg, hover):
