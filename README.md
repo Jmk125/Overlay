@@ -8,6 +8,7 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Batch or single overlay** — load individual PDFs or multi-page drawing sets; large sets can be loaded by typing a page range up front (e.g. `1-20, 45`), while the page picker auto-loads thumbnail previews in parallel when you need to choose visually
 - **Four matching modes** — auto-match by **OCR** (zoom/pan the page, draw a box around the sheet number; OCR runs across all CPU cores for large sets), match by each PDF's own **page label** (Acrobat/Bluebeam "Page Labels", for sets already scanned and labeled to correspond), match by **PDF page order**, or pair **manually**
 - **Unmatched queue** — click any unread/unmatched sheet to re-draw its OCR box (or edit its number); it re-matches automatically when numbers line up
+- **Include unmatched drawings for full-set review** — optionally carry sheets that only exist in one set into the overlay viewer instead of leaving them behind; each shows on its own (no counterpart to align against) and is flagged "A only"/"B only" in the pairs list
 - **Color compositing** — shared lines render black on a white canvas (white on a dark canvas); Set A only = your color; Set B only = your color
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
 - **Real-time alignment** — Drawing B moves and rotates live under the cursor (GPU-accelerated layer transforms); the full color composite is recomputed only when you release

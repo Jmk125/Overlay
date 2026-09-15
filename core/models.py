@@ -22,9 +22,14 @@ class DrawingPage:
 
 @dataclass
 class OverlayPair:
-    """A matched pair of pages to overlay"""
-    page_a: DrawingPage
-    page_b: DrawingPage
+    """A matched pair of pages to overlay.
+
+    page_a or page_b may be None for a drawing that exists in only one set
+    (included on request so the reviewer sees the full set, not just what
+    matched) — never both, that isn't a pair at all.
+    """
+    page_a: Optional[DrawingPage] = None
+    page_b: Optional[DrawingPage] = None
     pair_id: str = ""
 
     # Transform for page B relative to page A (page A is the anchor)
@@ -56,7 +61,15 @@ class OverlayPair:
 
     def __post_init__(self):
         if not self.pair_id:
-            self.pair_id = f"{self.page_a.sheet_number}_{self.page_b.sheet_number}"
+            a = self.page_a.sheet_number if self.page_a else ''
+            b = self.page_b.sheet_number if self.page_b else ''
+            self.pair_id = f"{a}_{b}"
+
+    @property
+    def is_partial(self) -> bool:
+        """True if this entry has only one side — a drawing unique to one
+        set, included for full-set review rather than a real match."""
+        return self.page_a is None or self.page_b is None
 
 
 @dataclass

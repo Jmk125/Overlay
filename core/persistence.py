@@ -9,6 +9,8 @@ from core.models import OverlaySet, OverlayPair, DrawingPage, WorkspaceDrawing
 def save_project(overlay_set: OverlaySet, filepath: str):
     """Save overlay project to a .overlay JSON file"""
     def page_to_dict(p: DrawingPage):
+        if p is None:
+            return None
         return {
             'pdf_path': p.pdf_path,
             'page_index': p.page_index,
@@ -79,6 +81,8 @@ def load_project(filepath: str) -> OverlaySet:
         data = json.load(f)
 
     def dict_to_page(d):
+        if d is None:
+            return None
         return DrawingPage(
             pdf_path=d['pdf_path'],
             page_index=d['page_index'],
@@ -152,7 +156,8 @@ def export_notes(overlay_set, filepath: str):
     """
     rows = []
     for i, pair in enumerate(overlay_set.pairs):
-        ident = (pair.page_a.sheet_number or pair.page_b.sheet_number
+        ident = ((pair.page_a.sheet_number if pair.page_a else '')
+                 or (pair.page_b.sheet_number if pair.page_b else '')
                  or pair.pair_id or f"Pair {i + 1}")
         rows.append((ident, pair.notes or ""))
 
