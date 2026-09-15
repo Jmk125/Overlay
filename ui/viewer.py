@@ -195,6 +195,7 @@ class MarkupOverlayItem(QGraphicsItem):
         self._hl_b_transform = QTransform()
         self._hl_view_mode = 'composite'
         self._hl_recolor_cache = {}
+        self._bg_color = QColor('#ffffff')
         self.setZValue(1000)   # always above the drawings
 
     def boundingRect(self) -> QRectF:
@@ -218,6 +219,10 @@ class MarkupOverlayItem(QGraphicsItem):
 
     def set_edit_selected_vertex(self, index):
         self._edit_selected_vertex = index
+        self.update()
+
+    def set_bg_color(self, color: QColor):
+        self._bg_color = color
         self.update()
 
     def set_highlight_source(self, pix_a, pix_b, pix_composite,
@@ -268,6 +273,12 @@ class MarkupOverlayItem(QGraphicsItem):
                     continue
                 painter.save()
                 painter.setClipPath(clip)
+                # Erase the original (still-colored) ink first — otherwise
+                # the tinted ink's own partial edge alpha blends with
+                # whatever color was already there instead of the page
+                # background, muddying it toward that old color instead of
+                # reading as a clean version of the picked highlight color.
+                painter.fillRect(self.boundingRect(), self._bg_color)
                 painter.setTransform(transform, True)
                 painter.drawPixmap(0, 0, tinted)
                 painter.restore()
@@ -660,6 +671,8 @@ class OverlayCanvas(QGraphicsView):
         self.gscene.setBackgroundBrush(QBrush(QColor(color)))
         if getattr(self, '_mask_item', None):
             self._mask_item.set_bg_color(QColor(color))
+        if getattr(self, '_markup_item', None):
+            self._markup_item.set_bg_color(QColor(color))
 
     def set_background(self, white: bool):
         self._bg_white = white
@@ -807,6 +820,7 @@ class OverlayCanvas(QGraphicsView):
         # Markup overlay sits above everything.
         self._markup_item = MarkupOverlayItem(self._canvas_w, self._canvas_h)
         self.gscene.addItem(self._markup_item)
+        self._markup_item.set_bg_color(QColor('#ffffff' if self._bg_white else '#0d0d0d'))
         self._selected_markup = None
         self._select_dragging = False
         if pair is not None:

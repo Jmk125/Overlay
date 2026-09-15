@@ -492,10 +492,16 @@ def apply_highlight_markups(content: Image.Image, markups: list, width: int, hei
     if result.size != (width, height):
         result = result.resize((width, height))
     ink_alpha = result.split()[3]
+    white = Image.new("RGBA", (width, height), (255, 255, 255, 255))
     for m in highlights:
         clip = _highlight_clip_image(m, width, height)
         combined = ImageChops.multiply(clip, ink_alpha)
         tint = Image.new("RGBA", (width, height), QColor(m.get('color') or '#ff0000').getRgb())
+        # Erase the box to blank paper first — otherwise a softly
+        # anti-aliased (partial-alpha) edge would blend the new color with
+        # whatever was already there instead of the page, muddying it
+        # toward that old color rather than reading as a clean highlight.
+        result = Image.composite(white, result, clip)
         result = Image.composite(tint, result, combined)
     return result
 
