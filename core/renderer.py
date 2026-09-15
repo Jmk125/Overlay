@@ -344,23 +344,41 @@ def mask_clip_image(masks: list, width: int, height: int) -> Image.Image:
     return img
 
 
-def composite_masked(overlay_img: Image.Image, base_img: Image.Image,
+def composite_masked(overlay_by_colors: dict, base_img: Image.Image,
                      masks: list, width: int, height: int) -> Image.Image:
-    """Show `overlay_img` only inside the mask polygons; `base_img` elsewhere.
+    """Show the full A+B overlay only inside each mask's polygon; `base_img`
+    elsewhere.
 
-    Backs the 'Masked Overlay' view/export: a single drawing shown normally,
-    with the full A+B overlay visible only inside the masked area(s).
+    Backs the (non-cutout) 'Masked Overlay' view/export. Each window mask can
+    independently recolor Set A and/or Set B just inside its own box — key
+    each mask's (window_color_a, window_color_b) tuple (either half may be
+    None, meaning "use the pair's default") into its pre-rendered overlay
+    image in `overlay_by_colors`; a mask with no override uses the (None,
+    None) entry, which the caller must always provide.
     """
     if not masks:
         return base_img.copy()
-    clip = mask_clip_image(masks, width, height)
-    a = overlay_img.convert("RGBA")
-    b = base_img.convert("RGBA")
-    if a.size != (width, height):
-        a = a.resize((width, height))
-    if b.size != (width, height):
-        b = b.resize((width, height))
-    return Image.composite(a, b, clip)
+    result = base_img.convert("RGBA")
+    if result.size != (width, height):
+        result = result.resize((width, height))
+    for m in masks:
+        if not m.get('visible', True):
+            continue
+        pts = m.get('points', [])
+        if len(pts) < 3:
+            continue
+        key = (m.get('window_color_a'), m.get('window_color_b'))
+        img = overlay_by_colors.get(key)
+        if img is None:
+            img = overlay_by_colors.get((None, None))
+        if img is None:
+            continue
+        a = img.convert("RGBA")
+        if a.size != (width, height):
+            a = a.resize((width, height))
+        clip = mask_clip_image([m], width, height)
+        result = Image.composite(a, result, clip)
+    return result
 
 
 def composite_masked_cutout(base_img: Image.Image, other_by_color: dict,
