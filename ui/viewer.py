@@ -1719,6 +1719,7 @@ class OverlayViewer(QWidget):
         # View section (collapsed by default)
         view_section = CollapsibleSection("View", collapsed=True)
         self.view_btns = {}
+        self.set_color_btns = {}
         for key, label in [('composite', 'Overlay (Both)'),
                             ('a', 'Set A only'),
                             ('b', 'Set B only'),
@@ -1728,8 +1729,20 @@ class OverlayViewer(QWidget):
             btn.setStyleSheet(self._toggle_btn_style())
             btn.clicked.connect(lambda checked, k=key: self._set_view(k))
             self.view_btns[key] = btn
-            view_section.addWidget(btn)
+            if key in ('a', 'b'):
+                row = QHBoxLayout()
+                row.addWidget(btn, 1)
+                swatch = QPushButton()
+                swatch.setFixedSize(26, 26)
+                swatch.setToolTip(f"Change the {'Set A' if key == 'a' else 'Set B'} color")
+                swatch.clicked.connect(lambda _, k=key: self._pick_set_color(k))
+                self.set_color_btns[key] = swatch
+                row.addWidget(swatch)
+                view_section.addLayout(row)
+            else:
+                view_section.addWidget(btn)
         self.view_btns['composite'].setChecked(True)
+        self._refresh_set_color_btns()
         right_layout.addWidget(view_section)
 
         # Masks section — only relevant to (and only shown during) the
@@ -2303,6 +2316,33 @@ class OverlayViewer(QWidget):
         text = text.strip()
         if 0 <= index < len(pair.masks) and text:
             pair.masks[index]['name'] = text
+
+    def _refresh_set_color_btns(self):
+        if 'a' in self.set_color_btns:
+            self.set_color_btns['a'].setStyleSheet(
+                f"background:{self.overlay_set.color_a}; border:1px solid #777; border-radius:3px;")
+        if 'b' in self.set_color_btns:
+            self.set_color_btns['b'].setStyleSheet(
+                f"background:{self.overlay_set.color_b}; border:1px solid #777; border-radius:3px;")
+
+    def _pick_set_color(self, side: str):
+        """Recolor Set A or Set B everywhere — every pair's composite,
+        solo view and mask defaults use this color, so changing it here
+        invalidates the whole render cache."""
+        current = self.overlay_set.color_a if side == 'a' else self.overlay_set.color_b
+        label = self.overlay_set.set_a_label if side == 'a' else self.overlay_set.set_b_label
+        c = QColorDialog.getColor(QColor(current), self, f"{label} Color")
+        if not c.isValid():
+            return
+        if side == 'a':
+            self.overlay_set.color_a = c.name()
+        else:
+            self.overlay_set.color_b = c.name()
+        self._refresh_set_color_btns()
+        self._invalidate_cache()
+        if self.overlay_set.pairs:
+            self._do_render()
+            self._refresh_mask_list()   # mask rows show this as their default color
 
     def _pick_mask_color(self, index: int):
         pair = self._current_pair()
