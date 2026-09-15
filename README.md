@@ -10,6 +10,8 @@ Compare drawing revisions with intelligent overlay, alignment, rotation, and ver
 - **Unmatched queue** — click any unread/unmatched sheet to re-draw its OCR box (or edit its number); it re-matches automatically when numbers line up
 - **Include unmatched drawings for full-set review** — optionally carry sheets that only exist in one set into the overlay viewer instead of leaving them behind; each shows on its own (no counterpart to align against) and is flagged "A only"/"B only" in the pairs list
 - **Color compositing** — shared lines render black on a white canvas (white on a dark canvas); Set A only = your color; Set B only = your color
+- **Recolor Set A/B anytime** — click the color swatch next to "Set A only"/"Set B only" in the View panel to change either color after the fact; every pair updates, no need to redo the overlay
+- **Masked Overlay** — draw a window over part of the sheet to show just that area differently: either both drawings overlaid (with each mask free to recolor Set A and/or Set B independently, just inside its own box) or, in Cutout mode, a punched-hole reveal of the other drawing alone (also independently colorable per mask)
 - **Version toggling** — hotkeys 1/2/3 to switch between overlay, A-only, B-only views
 - **Real-time alignment** — Drawing B moves and rotates live under the cursor (GPU-accelerated layer transforms); the full color composite is recomputed only when you release
 - **Fast batch navigation** — rendered pages are cached (instant when you return to one) and nearby pages are pre-rendered in the background so they're ready before you reach them
