@@ -15,7 +15,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QFont, QPixmap, QWheelEvent, QMouseEvent, QPainter,
     QColor, QPen, QBrush, QKeySequence, QShortcut, QCursor, QTransform,
-    QPolygonF
+    QPolygonF, QPainterPath
 )
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -150,6 +150,30 @@ def _screen_px(painter, px: float) -> float:
     return px / scale
 
 
+def _tinted_pixmap(source, color_hex: str, cache: dict):
+    """A tinted copy of `source`: same ink/alpha pattern, RGB replaced with
+    `color_hex`. Cached per color (in the caller-owned `cache` dict) since
+    it's recomputed on every repaint otherwise. Shared by the masked-overlay
+    cutout/color-mask retint and the Highlight markup tool."""
+    if not source:
+        return None
+    cached = cache.get(color_hex)
+    if cached is not None:
+        return cached
+    result = QPixmap(source.size())
+    result.fill(Qt.GlobalColor.transparent)
+    p = QPainter(result)
+    p.drawPixmap(0, 0, source)
+    # SourceIn keeps the destination's alpha (the ink pattern) and takes
+    # the newly-painted color for RGB — a cheap way to retint an
+    # alpha-mask image without re-rendering from the source PDF.
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(result.rect(), QColor(color_hex))
+    p.end()
+    cache[color_hex] = result
+    return result
+
+
 class MarkupOverlayItem(QGraphicsItem):
     """A single scene item that paints all of a pair's markups (plus the one
     currently being drawn). Coordinates are normalized 0-1 to the canvas."""
@@ -162,6 +186,15 @@ class MarkupOverlayItem(QGraphicsItem):
         self._selected = None   # index of selected markup, or None
         self._edit_index = None
         self._edit_selected_vertex = None
+        # What the Highlight tool recolors ink from — whichever pixmap the
+        # current view shows (B needs its live move/rotate transform too,
+        # since it isn't baked into a static pixmap like A and the composite).
+        self._hl_pix_a = None
+        self._hl_pix_b = None
+        self._hl_pix_composite = None
+        self._hl_b_transform = QTransform()
+        self._hl_view_mode = 'composite'
+        self._hl_recolor_cache = {}
         self.setZValue(1000)   # always above the drawings
 
     def boundingRect(self) -> QRectF:
@@ -187,11 +220,57 @@ class MarkupOverlayItem(QGraphicsItem):
         self._edit_selected_vertex = index
         self.update()
 
+    def set_highlight_source(self, pix_a, pix_b, pix_composite,
+                             b_transform: QTransform, view_mode: str):
+        self._hl_pix_a = pix_a
+        self._hl_pix_b = pix_b
+        self._hl_pix_composite = pix_composite
+        self._hl_b_transform = b_transform
+        self._hl_view_mode = view_mode
+        self._hl_recolor_cache = {}   # underlying ink or its position changed
+        self.update()
+
+    def _highlight_source(self):
+        """(pixmap, transform) for whatever the current view shows. 'mask'
+        view approximates with the full composite — export computes the
+        true masked+highlighted result exactly; only this live preview
+        simplifies it."""
+        mode = self._hl_view_mode
+        if mode == 'a':
+            return self._hl_pix_a, QTransform()
+        if mode == 'b':
+            return self._hl_pix_b, self._hl_b_transform
+        return self._hl_pix_composite, QTransform()
+
     def paint(self, painter, option, widget=None):
-        items = list(self._markups)
+        # Highlight markups recolor the ink beneath them in place rather
+        # than drawing a shape on top, so they're painted separately below
+        # and excluded here — except the one still being drawn, which gets
+        # a plain dashed outline preview like any other pending shape.
+        items = [m for m in self._markups if m.get('type') not in R.HIGHLIGHT_TYPES]
         if self._pending:
             items = items + [self._pending]
         R.paint_markups(painter, items, self._w, self._h)
+
+        source, transform = self._highlight_source()
+        if source:
+            for m in self._markups:
+                if m.get('type') not in R.HIGHLIGHT_TYPES or not m.get('visible', True):
+                    continue
+                pts = m.get('points', [])
+                if len(pts) < 2:
+                    continue
+                clip = self._highlight_clip_path(m)
+                if clip.isEmpty():
+                    continue
+                tinted = _tinted_pixmap(source, m.get('color') or '#ff0000', self._hl_recolor_cache)
+                if not tinted:
+                    continue
+                painter.save()
+                painter.setClipPath(clip)
+                painter.setTransform(transform, True)
+                painter.drawPixmap(0, 0, tinted)
+                painter.restore()
 
         # Selection highlight (dashed box + corner handles).
         if self._selected is not None and 0 <= self._selected < len(self._markups):
@@ -235,6 +314,23 @@ class MarkupOverlayItem(QGraphicsItem):
                     painter.setBrush(QColor('#ffdd00') if i == self._edit_selected_vertex
                                      else QColor('#00e0ff'))
                     painter.drawEllipse(p, r, r)
+
+    def _highlight_clip_path(self, m: dict) -> QPainterPath:
+        """A Highlight markup's box/polygon as a clip path in canvas pixels —
+        its two corners in either order for 'highlight_rect', or a closed
+        polygon for 'highlight_poly'."""
+        path = QPainterPath()
+        pts = m.get('points', [])
+        if m.get('type') == 'highlight_rect' and len(pts) >= 2:
+            rect = QRectF(QPointF(pts[0][0] * self._w, pts[0][1] * self._h),
+                          QPointF(pts[1][0] * self._w, pts[1][1] * self._h)).normalized()
+            path.addRect(rect)
+        elif len(pts) >= 3:
+            path.moveTo(pts[0][0] * self._w, pts[0][1] * self._h)
+            for p in pts[1:]:
+                path.lineTo(p[0] * self._w, p[1] * self._h)
+            path.closeSubpath()
+        return path
 
 
 class MaskedOverlayItem(QGraphicsItem):
@@ -308,38 +404,15 @@ class MaskedOverlayItem(QGraphicsItem):
         self._recolor_cache = {}   # base image changed — cached tints are stale
         self.update()
 
-    @staticmethod
-    def _tinted(source, color_hex: str, cache: dict):
-        """A tinted copy of `source`: same ink/alpha pattern, RGB replaced
-        with `color_hex`. Cached per color since it's recomputed on every
-        repaint otherwise."""
-        if not source:
-            return None
-        cached = cache.get(color_hex)
-        if cached is not None:
-            return cached
-        result = QPixmap(source.size())
-        result.fill(Qt.GlobalColor.transparent)
-        p = QPainter(result)
-        p.drawPixmap(0, 0, source)
-        # SourceIn keeps the destination's alpha (the ink pattern) and takes
-        # the newly-painted color for RGB — a cheap way to retint an
-        # alpha-mask image without re-rendering from the source PDF.
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        p.fillRect(result.rect(), QColor(color_hex))
-        p.end()
-        cache[color_hex] = result
-        return result
-
     def _recolored_other(self, color_hex: str):
         """The "other" drawing's ink, retinted to `color_hex`."""
-        return self._tinted(self._other_pixmap, color_hex, self._recolor_cache)
+        return _tinted_pixmap(self._other_pixmap, color_hex, self._recolor_cache)
 
     def _recolored_composite(self, color_hex: str):
         """The full A+B overlay's ink, retinted to `color_hex` — used by
         color masks to recolor the actual linework inside their box rather
         than painting an opaque fill over it."""
-        return self._tinted(self._composite_pixmap, color_hex, self._composite_recolor_cache)
+        return _tinted_pixmap(self._composite_pixmap, color_hex, self._composite_recolor_cache)
 
     def set_other_transform(self, transform: QTransform):
         self._other_transform = transform
@@ -499,6 +572,10 @@ class OverlayCanvas(QGraphicsView):
     MODE_MASK_EDIT = 5
     MODE_MARKUP_EDIT = 6
 
+    # Markup tools built by clicking out a series of points rather than a
+    # single drag: an open polyline, or a closed Highlight polygon.
+    CLICK_POLY_TOOLS = ('polyline', 'highlight_poly')
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.gscene = QGraphicsScene(self)
@@ -614,7 +691,7 @@ class OverlayCanvas(QGraphicsView):
 
     def set_mode(self, mode: int):
         if self._mode == self.MODE_MARKUP and mode != self.MODE_MARKUP:
-            if self._markup_tool == 'polyline':
+            if self._markup_tool in self.CLICK_POLY_TOOLS:
                 self._cancel_polyline_markup()
             elif self._pending_markup is not None:
                 self._pending_markup = None
@@ -734,6 +811,7 @@ class OverlayCanvas(QGraphicsView):
         self._select_dragging = False
         if pair is not None:
             self._markup_item.set_markups(pair.markups)
+        self._sync_markup_highlight_source()
 
         self._update_visibility()
         if reset_view:
@@ -742,7 +820,7 @@ class OverlayCanvas(QGraphicsView):
     # ── Markups ───────────────────────────────────────────────────
     def set_markup_tool(self, tool: str):
         if tool != self._markup_tool:
-            if self._markup_tool == 'polyline':
+            if self._markup_tool in self.CLICK_POLY_TOOLS:
                 self._cancel_polyline_markup()
             elif self._pending_markup is not None:
                 # A click-started line/rect/cloud left open — abandon it,
@@ -769,18 +847,31 @@ class OverlayCanvas(QGraphicsView):
             self._markup_item.set_pending(None)
 
     def _finish_polyline_markup(self):
-        """Close the in-progress polyline (needs >= 2 points) into a new
-        markup, then stop — a fresh click starts a separate one."""
-        if self._pair is not None and len(self._polyline_points) >= 2:
-            markup = {
-                'type': 'polyline',
-                'points': [list(p) for p in self._polyline_points],
-                'color': self._markup_color,
-                'width': self._markup_width,
-                'dash': self._markup_dash,
-                'visible': True,
-                'name': self._next_markup_name('polyline'),
-            }
+        """Close the in-progress click-placed shape into a new markup, then
+        stop — a fresh click starts a separate one. An open polyline needs
+        >= 2 points; a Highlight polygon closes back to its start and needs
+        >= 3."""
+        tool = self._markup_tool
+        min_points = 3 if tool == 'highlight_poly' else 2
+        if self._pair is not None and len(self._polyline_points) >= min_points:
+            if tool == 'highlight_poly':
+                markup = {
+                    'type': 'highlight_poly',
+                    'points': [list(p) for p in self._polyline_points],
+                    'color': self._markup_color,
+                    'visible': True,
+                    'name': self._next_markup_name(tool),
+                }
+            else:
+                markup = {
+                    'type': 'polyline',
+                    'points': [list(p) for p in self._polyline_points],
+                    'color': self._markup_color,
+                    'width': self._markup_width,
+                    'dash': self._markup_dash,
+                    'visible': True,
+                    'name': self._next_markup_name(tool),
+                }
             self._pair.markups.append(markup)
             if self._markup_item:
                 self._markup_item.set_markups(self._pair.markups)
@@ -793,7 +884,8 @@ class OverlayCanvas(QGraphicsView):
         if self._markup_item:
             self._markup_item.set_pending(None)
 
-    _MARKUP_TYPE_LABELS = {'line': 'Line', 'polyline': 'Polyline', 'rect': 'Box', 'cloud': 'Cloud'}
+    _MARKUP_TYPE_LABELS = {'line': 'Line', 'polyline': 'Polyline', 'rect': 'Box', 'cloud': 'Cloud',
+                          'highlight_rect': 'Highlight Box', 'highlight_poly': 'Highlight Area'}
 
     def _next_markup_name(self, mtype: str) -> str:
         label = self._MARKUP_TYPE_LABELS.get(mtype, mtype.capitalize() if mtype else 'Markup')
@@ -871,10 +963,13 @@ class OverlayCanvas(QGraphicsView):
                       for (x0, y0), (x1, y1) in zip(pts, pts[1:])):
                     return i
             else:
-                (x0, y0), (x1, y1) = pts[0], pts[1]
-                xmin, xmax = min(x0, x1), max(x0, x1)
-                ymin, ymax = min(y0, y1), max(y0, y1)
-                if xmin - tol <= px <= xmax + tol and ymin - tol <= py <= ymax + tol:
+                # Bounding box of all points — for a 2-point rect/cloud/
+                # highlight box that's exact; for an N-point highlight area
+                # it's a reasonable, cheap approximation.
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                if (min(xs) - tol <= px <= max(xs) + tol
+                        and min(ys) - tol <= py <= max(ys) + tol):
                     return i
         return None
 
@@ -1040,7 +1135,7 @@ class OverlayCanvas(QGraphicsView):
                 and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)):
             self.markup_delete_selected()
             return
-        if self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline':
+        if self._mode == self.MODE_MARKUP and self._markup_tool in self.CLICK_POLY_TOOLS:
             if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self._polyline_points:
                 self._polyline_points.pop()
                 if self._pending_markup:
@@ -1105,6 +1200,7 @@ class OverlayCanvas(QGraphicsView):
             return
         self._item_b.setTransform(self._b_qtransform())
         self._sync_mask_cutout_layer()
+        self._sync_markup_highlight_source()
 
     def _sync_mask_cutout_layer(self):
         """Keep the mask-cutout preview's "other drawing" pixmap/transform in
@@ -1120,10 +1216,21 @@ class OverlayCanvas(QGraphicsView):
             self._mask_item.set_other_pixmap(self._pix_a)
             self._mask_item.set_other_transform(QTransform())
 
+    def _sync_markup_highlight_source(self):
+        """Feed the markup layer whatever pixmap the Highlight tool should
+        recolor ink from for the current view (B needs its live transform
+        too, since it isn't baked into a static pixmap)."""
+        if not self._markup_item:
+            return
+        self._markup_item.set_highlight_source(
+            self._pix_a, self._pix_b, self._pix_composite,
+            self._b_qtransform(), self._view_mode)
+
     def set_view_mode(self, mode: str):
         """mode: 'composite', 'a', or 'b'"""
         self._view_mode = mode
         self._update_visibility()
+        self._sync_markup_highlight_source()
 
     def _set_live(self, on: bool):
         self._live = on
@@ -1278,14 +1385,14 @@ class OverlayCanvas(QGraphicsView):
                         self._select_dragging = True
                         self._select_last = scene_pt
                     return
-                if self._markup_tool == 'polyline':
+                if self._markup_tool in self.CLICK_POLY_TOOLS:
                     if self._polyline_points and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                         pt = self._snapped_point_norm(self._polyline_points[-1], scene_pt)
                     else:
                         pt = self._scene_to_norm(scene_pt)
                     self._polyline_points.append(pt)
                     self._pending_markup = {
-                        'type': 'polyline',
+                        'type': self._markup_tool,
                         'points': [list(p) for p in self._polyline_points],
                         'color': self._markup_color,
                         'width': self._markup_width,
@@ -1375,14 +1482,14 @@ class OverlayCanvas(QGraphicsView):
             self._markup_item.set_markups(self._pair.markups)
             return
 
-        if self._markup_tool == 'polyline' and self._polyline_points:
+        if self._markup_tool in self.CLICK_POLY_TOOLS and self._polyline_points:
             scene_pt = self.mapToScene(event.position().toPoint())
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 cur = self._snapped_point_norm(self._polyline_points[-1], scene_pt)
             else:
                 cur = self._scene_to_norm(scene_pt)
             preview = {
-                'type': 'polyline',
+                'type': self._markup_tool,
                 'points': [list(p) for p in self._polyline_points] + [cur],
                 'color': self._markup_color,
                 'width': self._markup_width,
@@ -1393,7 +1500,7 @@ class OverlayCanvas(QGraphicsView):
                 self._markup_item.set_pending(preview)
             return
 
-        if self._pending_markup is not None and self._markup_tool != 'polyline':
+        if self._pending_markup is not None and self._markup_tool not in self.CLICK_POLY_TOOLS:
             scene_pt = self.mapToScene(event.position().toPoint())
             if self._markup_tool == 'line' and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 cur = self._snapped_point_norm(self._pending_markup['points'][0], scene_pt)
@@ -1486,7 +1593,7 @@ class OverlayCanvas(QGraphicsView):
             self._select_dragging = False
             self.markups_changed.emit()   # committed move
             return
-        if (self._pending_markup is not None and self._markup_tool != 'polyline'
+        if (self._pending_markup is not None and self._markup_tool not in self.CLICK_POLY_TOOLS
                 and event.button() == Qt.MouseButton.LeftButton):
             p0, p1 = self._pending_markup['points']
             if abs(p1[0] - p0[0]) > 0.003 or abs(p1[1] - p0[1]) > 0.003:
@@ -1515,7 +1622,7 @@ class OverlayCanvas(QGraphicsView):
             if insert_idx is not None:
                 self._mask_edit_insert_vertex(insert_idx, scene_pt)
             return
-        if (self._mode == self.MODE_MARKUP and self._markup_tool == 'polyline'
+        if (self._mode == self.MODE_MARKUP and self._markup_tool in self.CLICK_POLY_TOOLS
                 and event.button() == Qt.MouseButton.LeftButton):
             self._finish_polyline_markup()
             return
@@ -1983,6 +2090,22 @@ class OverlayViewer(QWidget):
             tool_row.addWidget(b)
         markup_section.addLayout(tool_row)
 
+        highlight_row = QHBoxLayout()
+        for key, label in [('highlight_rect', '🖊 Highlight Box'),
+                           ('highlight_poly', '🖊 Highlight Area')]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setStyleSheet(self._toggle_btn_style())
+            b.clicked.connect(lambda _, k=key: self._set_markup_tool(k))
+            self.markup_btns[key] = b
+            highlight_row.addWidget(b)
+        markup_section.addLayout(highlight_row)
+        markup_section.addWidget(QLabel(
+            "Highlight recolors the drawing's own linework inside the box/area "
+            "(to your Markup color below) instead of drawing a shape on top of "
+            "it — handy for calling out what's changing, e.g. walls in a demo "
+            "phase.", styleSheet="color:#666; font-size:9px;", wordWrap=True))
+
         cw_row = QHBoxLayout()
         cw_row.addWidget(QLabel("Color:"))
         self.markup_color_btn = QPushButton()
@@ -2059,12 +2182,14 @@ class OverlayViewer(QWidget):
         markup_section.addWidget(clear_markups_btn)
 
         markup_section.addWidget(QLabel(
-            "Line/Box/Cloud: click to start, move to preview live, click "
-            "again to finish (or just drag). Polyline: click to add each "
-            "point, double-click or Enter to finish (doesn't need to close). "
-            "Hold Shift while drawing a Line or Polyline segment to snap it "
-            "to horizontal, vertical, or 45°. Esc turns the tool off. "
-            "Select: click a markup to move it, "
+            "Line/Box/Cloud/Highlight Box: click to start, move to preview "
+            "live, click again to finish (or just drag). Polyline/Highlight "
+            "Area: click to add each point; Polyline finishes with "
+            "double-click or Enter (doesn't need to close), Highlight Area "
+            "closes back to its start the same way (needs 3+ points). "
+            "Hold Shift while drawing a Line, Polyline, or Highlight Area "
+            "segment to snap it to horizontal, vertical, or 45°. Esc turns "
+            "the tool off. Select: click a markup to move it, "
             "Delete removes it. Edit (✎): drag a point to reshape, "
             "double-click a line to add a point there, drag inside to move "
             "the whole markup, Delete removes the selected point, Esc/Enter "
@@ -3157,6 +3282,27 @@ class OverlayViewer(QWidget):
                 return k
         return 'composite'
 
+    def _flatten_export_content(self, content, pair: OverlayPair):
+        """White-background flatten `content` for export, optionally
+        recoloring Highlight markups' ink in place first and burning the
+        rest of the markups on top after — shared by every export path
+        (single-sided and each of the four full-overlay views)."""
+        include = self.include_markups_chk.isChecked() and pair.markups
+        if include:
+            content = R.apply_highlight_markups(content, pair.markups, content.width, content.height)
+        bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
+        bg.paste(content, mask=content)
+        final = bg.convert("RGB")
+        if include:
+            drawn = [m for m in pair.markups if m.get('type') not in R.HIGHLIGHT_TYPES]
+            if drawn:
+                W, H = final.size
+                mk = R.render_markups_pil(drawn, W, H)
+                final = final.convert("RGBA")
+                final.alpha_composite(mk)
+                final = final.convert("RGB")
+        return final
+
     def _export(self, fmt: str):
         pair = self._current_pair()
         view_mode = self._current_view_mode()
@@ -3189,15 +3335,7 @@ class OverlayViewer(QWidget):
                 color = self.overlay_set.color_a if pair.page_a else self.overlay_set.color_b
                 img = R.render_page(page.pdf_path, page.page_index, dpi)
                 content = R.render_single_colored(img, color)
-                bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
-                bg.paste(content, mask=content)
-                final = bg.convert("RGB")
-                if self.include_markups_chk.isChecked() and pair.markups:
-                    W, H = final.size
-                    mk = R.render_markups_pil(pair.markups, W, H)
-                    final = final.convert("RGBA")
-                    final.alpha_composite(mk)
-                    final = final.convert("RGB")
+                final = self._flatten_export_content(content, pair)
                 if fmt == 'png':
                     final.save(path)
                 elif fmt == 'pdf':
@@ -3277,18 +3415,7 @@ class OverlayViewer(QWidget):
                                                self.overlay_set.color_b,
                                                shared_color=self.overlay_set.shared_color)
 
-            # White background for export
-            bg = Image.new("RGBA", content.size, (255, 255, 255, 255))
-            bg.paste(content, mask=content)
-            final = bg.convert("RGB")
-
-            # Optionally burn in the user's markups at export resolution.
-            if self.include_markups_chk.isChecked() and pair.markups:
-                W, H = final.size
-                mk = R.render_markups_pil(pair.markups, W, H)
-                final = final.convert("RGBA")
-                final.alpha_composite(mk)
-                final = final.convert("RGB")
+            final = self._flatten_export_content(content, pair)
 
             if fmt == 'png':
                 final.save(path)
