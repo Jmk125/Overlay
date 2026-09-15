@@ -215,6 +215,7 @@ class MaskedOverlayItem(QGraphicsItem):
         self._edit_index = None
         self._edit_selected_vertex = None
         self._recolor_cache = {}   # color hex -> recolored other_pixmap
+        self._composite_recolor_cache = {}   # color hex -> recolored composite_pixmap
         self.setZValue(900)   # above the base layers, below markups (1000)
 
     def boundingRect(self) -> QRectF:
@@ -222,11 +223,13 @@ class MaskedOverlayItem(QGraphicsItem):
 
     def set_composite_pixmap(self, pixmap):
         self._composite_pixmap = pixmap
+        self._composite_recolor_cache = {}   # ink pattern changed — cached tints are stale
         self.update()
 
     def set_masks(self, masks: list):
         self._masks = masks
         self._recolor_cache = {}   # a mask's color override may have changed
+        self._composite_recolor_cache = {}
         self.update()
 
     def set_pending_points(self, points: list):
@@ -250,27 +253,38 @@ class MaskedOverlayItem(QGraphicsItem):
         self._recolor_cache = {}   # base image changed — cached tints are stale
         self.update()
 
-    def _recolored_other(self, color_hex: str):
-        """A tinted copy of the "other" drawing's pixmap: same ink/alpha
-        pattern, RGB replaced with `color_hex`. Cached per color since it's
-        recomputed on every repaint otherwise."""
-        if not self._other_pixmap:
+    @staticmethod
+    def _tinted(source, color_hex: str, cache: dict):
+        """A tinted copy of `source`: same ink/alpha pattern, RGB replaced
+        with `color_hex`. Cached per color since it's recomputed on every
+        repaint otherwise."""
+        if not source:
             return None
-        cached = self._recolor_cache.get(color_hex)
+        cached = cache.get(color_hex)
         if cached is not None:
             return cached
-        result = QPixmap(self._other_pixmap.size())
+        result = QPixmap(source.size())
         result.fill(Qt.GlobalColor.transparent)
         p = QPainter(result)
-        p.drawPixmap(0, 0, self._other_pixmap)
+        p.drawPixmap(0, 0, source)
         # SourceIn keeps the destination's alpha (the ink pattern) and takes
         # the newly-painted color for RGB — a cheap way to retint an
         # alpha-mask image without re-rendering from the source PDF.
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
         p.fillRect(result.rect(), QColor(color_hex))
         p.end()
-        self._recolor_cache[color_hex] = result
+        cache[color_hex] = result
         return result
+
+    def _recolored_other(self, color_hex: str):
+        """The "other" drawing's ink, retinted to `color_hex`."""
+        return self._tinted(self._other_pixmap, color_hex, self._recolor_cache)
+
+    def _recolored_composite(self, color_hex: str):
+        """The full A+B overlay's ink, retinted to `color_hex` — used by
+        color masks to recolor the actual linework inside their box rather
+        than painting an opaque fill over it."""
+        return self._tinted(self._composite_pixmap, color_hex, self._composite_recolor_cache)
 
     def set_other_transform(self, transform: QTransform):
         self._other_transform = transform
@@ -335,14 +349,22 @@ class MaskedOverlayItem(QGraphicsItem):
                     painter.drawPixmap(0, 0, self._composite_pixmap)
                     painter.restore()
 
+            # Color masks recolor the actual linework inside their box (kept
+            # as its normal ink/alpha pattern, just retinted) rather than
+            # covering the box with a flat fill — blank paper in the box
+            # stays untouched, so whatever's underneath still shows through.
             for m in color_masks:
                 if not m.get('visible', True):
                     continue
                 sub_path = R.mask_clip_qpath([m], self._w, self._h)
                 if sub_path.isEmpty():
                     continue
+                tinted = self._recolored_composite(m.get('color') or '#ff0000')
+                if not tinted:
+                    continue
                 painter.save()
-                painter.fillPath(sub_path, QColor(m.get('color') or '#ff0000'))
+                painter.setClipPath(sub_path)
+                painter.drawPixmap(0, 0, tinted)
                 painter.restore()
 
         # The mask being reshaped in Edit mode always shows its handles,
@@ -2169,7 +2191,7 @@ class OverlayViewer(QWidget):
             color_btn = QPushButton()
             color_btn.setFixedSize(20, 22)
             color_btn.setToolTip(
-                "Fill color for this color mask." if is_color_mask else
+                "Recolor the linework inside this color mask." if is_color_mask else
                 "Cutout reveal color for this mask (only visible with Cutout on). "
                 "Right-click to reset to the default color.")
             color_btn.setStyleSheet(
@@ -2251,7 +2273,7 @@ class OverlayViewer(QWidget):
                          (self.overlay_set.color_b if pair.mask_base == 'a'
                           else self.overlay_set.color_a))
         current = pair.masks[index].get('color') or default_color
-        title = "Color Mask Fill Color" if is_color_mask else "Mask Cutout Color"
+        title = "Color Mask Line Color" if is_color_mask else "Mask Cutout Color"
         c = QColorDialog.getColor(QColor(current), self, title)
         if c.isValid():
             pair.masks[index]['color'] = c.name()
@@ -2940,10 +2962,15 @@ class OverlayViewer(QWidget):
                               else self.overlay_set.color_b)
                 base_src = img_a if pair.mask_base == 'a' else img_b
                 base_solo = R.render_single_colored(base_src, base_color)
-                # Color masks replace their box with a flat fill outright, so
-                # they're excluded from the reveal/cutout "window" masks and
-                # painted on top separately, below.
+                # Color masks recolor the linework inside their box rather
+                # than replacing it, so they're excluded from the
+                # reveal/cutout "window" masks and applied on top separately,
+                # below, using the full A+B overlay as their ink source.
                 window_masks = [m for m in pair.masks if m.get('type') != 'color']
+                inside = R.composite_overlay(img_a, img_b,
+                                              self.overlay_set.color_a,
+                                              self.overlay_set.color_b,
+                                              shared_color=self.overlay_set.shared_color)
                 if pair.mask_cutout:
                     # Cutout: the hole reveals the OTHER drawing alone, not
                     # the two blended together. Each mask can override the
@@ -2961,13 +2988,10 @@ class OverlayViewer(QWidget):
                     content = R.composite_masked_cutout(base_solo, other_by_color, window_masks,
                                                          img_a.width, img_a.height)
                 else:
-                    inside = R.composite_overlay(img_a, img_b,
-                                                  self.overlay_set.color_a,
-                                                  self.overlay_set.color_b,
-                                                  shared_color=self.overlay_set.shared_color)
                     content = R.composite_masked(inside, base_solo, window_masks,
                                                   img_a.width, img_a.height)
-                content = R.composite_color_masks(content, pair.masks, img_a.width, img_a.height)
+                content = R.composite_color_masks(content, inside, pair.masks,
+                                                   img_a.width, img_a.height)
             else:
                 content = R.composite_overlay(img_a, img_b,
                                                self.overlay_set.color_a,

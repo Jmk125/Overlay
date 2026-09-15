@@ -392,25 +392,34 @@ def composite_masked_cutout(base_img: Image.Image, other_by_color: dict,
     return result
 
 
-def composite_color_masks(base_img: Image.Image, masks: list, width: int, height: int) -> Image.Image:
-    """Paint each color-type mask as a flat, opaque fill on top of `base_img`.
+def composite_color_masks(base_img: Image.Image, ink_img: Image.Image,
+                          masks: list, width: int, height: int) -> Image.Image:
+    """Recolor the linework inside each color-type mask to a flat color, on
+    top of `base_img`.
 
     Backs color masks in the 'Masked Overlay' view/export: unlike a regular
-    mask (which reveals a drawing inside its box), a color mask replaces its
-    box outright with a solid color.
+    mask (which reveals a drawing inside its box), a color mask keeps
+    whatever's already showing and just retints the ink within its box —
+    blank paper in the box is left untouched. `ink_img` is the full A+B
+    overlay (RGBA, alpha = ink darkness) used as the source of that ink.
     """
     result = base_img.convert("RGBA")
     if result.size != (width, height):
         result = result.resize((width, height))
-    draw = ImageDraw.Draw(result)
+    ink = ink_img.convert("RGBA")
+    if ink.size != (width, height):
+        ink = ink.resize((width, height))
+    ink_alpha = ink.split()[3]
     for m in masks:
         if not m.get('visible', True) or m.get('type') != 'color':
             continue
         pts = m.get('points', [])
         if len(pts) < 3:
             continue
-        draw.polygon([(p[0] * width, p[1] * height) for p in pts],
-                     fill=QColor(m.get('color') or '#ff0000').getRgb())
+        clip = mask_clip_image([m], width, height)
+        combined = ImageChops.multiply(clip, ink_alpha)
+        tint = Image.new("RGBA", (width, height), QColor(m.get('color') or '#ff0000').getRgb())
+        result = Image.composite(tint, result, combined)
     return result
 
 
