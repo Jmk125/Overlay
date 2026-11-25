@@ -541,7 +541,8 @@ class EmptyWorkspace(QWidget):
         self.move_btn = QPushButton('↕  Move (click & drag)')
         self.move_btn.setCheckable(True)
         self.move_btn.setStyleSheet(self._toggle_btn_style())
-        self.move_btn.clicked.connect(lambda: self._set_mode('move'))
+        self.move_btn.clicked.connect(
+            lambda checked: self._set_mode('move' if checked else 'view'))
         align_section.addWidget(self.move_btn)
         nudge_row = QHBoxLayout()
         for label, dx, dy in [('←', -1, 0), ('→', 1, 0), ('↑', 0, -1), ('↓', 0, 1)]:
@@ -554,7 +555,8 @@ class EmptyWorkspace(QWidget):
         self.rotate_btn = QPushButton('↻  Free Rotate (click & drag)')
         self.rotate_btn.setCheckable(True)
         self.rotate_btn.setStyleSheet(self._toggle_btn_style())
-        self.rotate_btn.clicked.connect(lambda: self._set_mode('rotate'))
+        self.rotate_btn.clicked.connect(
+            lambda checked: self._set_mode('rotate' if checked else 'view'))
         align_section.addWidget(self.rotate_btn)
         rot_row = QHBoxLayout()
         rot_row.addWidget(QLabel('Angle:'))

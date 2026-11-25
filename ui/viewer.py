@@ -1160,6 +1160,12 @@ class OverlayCanvas(QGraphicsView):
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._finish_polyline_markup()
                 return
+        if (self._mode in (self.MODE_MOVE, self.MODE_ROTATE)
+                and event.key() == Qt.Key.Key_Escape):
+            # Leave align mode so the drag pans/does nothing again.
+            self._b_dragging = False
+            self.set_mode(self.MODE_VIEW)
+            return
         if self._mode == self.MODE_MARKUP and event.key() == Qt.Key.Key_Escape:
             # Turn the markup tool off entirely (also drops any in-progress
             # shape — a click-started line/rect/cloud or polyline).
@@ -1990,7 +1996,8 @@ class OverlayViewer(QWidget):
         self.move_btn = QPushButton("↕  Move (click & drag)")
         self.move_btn.setCheckable(True)
         self.move_btn.setStyleSheet(self._toggle_btn_style())
-        self.move_btn.clicked.connect(lambda: self._set_align_mode('move'))
+        self.move_btn.clicked.connect(
+            lambda checked: self._set_align_mode('move' if checked else 'view'))
         align_section.addWidget(self.move_btn)
 
         nudge_row = QHBoxLayout()
@@ -2018,7 +2025,8 @@ class OverlayViewer(QWidget):
         self.rotate_btn = QPushButton("↻  Free Rotate (click & drag)")
         self.rotate_btn.setCheckable(True)
         self.rotate_btn.setStyleSheet(self._toggle_btn_style())
-        self.rotate_btn.clicked.connect(lambda: self._set_align_mode('rotate'))
+        self.rotate_btn.clicked.connect(
+            lambda checked: self._set_align_mode('rotate' if checked else 'view'))
         rot_section.addWidget(self.rotate_btn)
 
         rot_val_row = QHBoxLayout()
@@ -2757,6 +2765,8 @@ class OverlayViewer(QWidget):
         self._sync_markup_ui()
 
     def _on_canvas_mode_changed(self, mode: int):
+        self.move_btn.setChecked(mode == OverlayCanvas.MODE_MOVE)
+        self.rotate_btn.setChecked(mode == OverlayCanvas.MODE_ROTATE)
         self._sync_mask_ui()
         self._sync_markup_ui()
 
