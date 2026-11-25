@@ -59,6 +59,10 @@ class OverlayPair:
     mask_base: str = "a"
     mask_cutout: bool = False
 
+    # Per-overlay color overrides (None = use the project's Set A / Set B color)
+    color_a: Optional[str] = None
+    color_b: Optional[str] = None
+
     def __post_init__(self):
         if not self.pair_id:
             a = self.page_a.sheet_number if self.page_a else ''
@@ -114,6 +118,10 @@ class OverlaySet:
     # Real-world reference scale for the workspace (e.g. 1/8" = 1'). When set,
     # each drawing can be auto-resized so its drawing scale matches this.
     workspace_ref_scale: str = ""
+
+    def colors_for(self, pair) -> tuple:
+        """(color_a, color_b) for a pair: its own override, else the set default."""
+        return (pair.color_a or self.color_a, pair.color_b or self.color_b)
 
 
 # Common architectural/engineering scales

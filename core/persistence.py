@@ -36,6 +36,8 @@ def save_project(overlay_set: OverlaySet, filepath: str):
             'masks': pair.masks,
             'mask_base': pair.mask_base,
             'mask_cutout': pair.mask_cutout,
+            'color_a': pair.color_a,
+            'color_b': pair.color_b,
         }
 
     def workspace_to_dict(d: WorkspaceDrawing):
@@ -121,6 +123,8 @@ def load_project(filepath: str) -> OverlaySet:
             masks=pd.get('masks', []) or [],
             mask_base=pd.get('mask_base', 'a') or 'a',
             mask_cutout=pd.get('mask_cutout', False),
+            color_a=pd.get('color_a') or None,
+            color_b=pd.get('color_b') or None,
         )
         overlay_set.pairs.append(pair)
 

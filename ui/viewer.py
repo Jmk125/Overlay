@@ -19,7 +19,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsItem, QApplication, QPlainTextEdit
+    QGraphicsEllipseItem, QGraphicsItem, QMenu, QApplication, QPlainTextEdit
 )
 import math
 import os
@@ -52,13 +52,14 @@ class RenderWorker(QThread):
             if self.cancelled:
                 return
             pair = self.pair
+            col_a, col_b = self.overlay_set.colors_for(pair)
 
             # A drawing that exists in only one set (included for full-set
             # review) has nothing to overlay against — just render that one
             # side, in its set's color, as both the solo view and "composite".
             if pair.is_partial:
                 page = pair.page_a or pair.page_b
-                color = self.overlay_set.color_a if pair.page_a else self.overlay_set.color_b
+                color = col_a if pair.page_a else col_b
                 img = R.render_page(page.pdf_path, page.page_index, dpi)
                 if self.cancelled:
                     return
@@ -95,15 +96,15 @@ class RenderWorker(QThread):
                 return
             # Composite
             composite = R.composite_overlay(img_a, img_b,
-                                             self.overlay_set.color_a,
-                                             self.overlay_set.color_b,
+                                             col_a,
+                                             col_b,
                                              shared_color=self.overlay_set.shared_color)
             if self.cancelled:
                 return
             # A layer is canvas-sized; B layer is RAW (natural size, no
             # transform) so the canvas can move/rotate it live via Qt.
-            solo_a = R.render_single_colored(img_a, self.overlay_set.color_a)
-            solo_b_raw = R.render_single_colored(img_b_raw, self.overlay_set.color_b)
+            solo_a = R.render_single_colored(img_a, col_a)
+            solo_b_raw = R.render_single_colored(img_b_raw, col_b)
 
             if self.cancelled:
                 return
@@ -125,8 +126,8 @@ class RenderWorker(QThread):
                 if self.cancelled:
                     return
                 ov = R.composite_overlay(img_a, img_b,
-                                          ca or self.overlay_set.color_a,
-                                          cb or self.overlay_set.color_b,
+                                          ca or col_a,
+                                          cb or col_b,
                                           shared_color=self.overlay_set.shared_color)
                 mask_overlays[key] = R.pil_to_qpixmap(ov)
 
@@ -1893,7 +1894,7 @@ class OverlayViewer(QWidget):
         right_layout.addLayout(right_header)
 
         # View section (collapsed by default)
-        view_section = CollapsibleSection("View", collapsed=True)
+        view_section = CollapsibleSection("View", collapsed=False)
         self.view_btns = {}
         self.set_color_btns = {}
         for key, label in [('composite', 'Overlay (Both)'),
@@ -1910,8 +1911,12 @@ class OverlayViewer(QWidget):
                 row.addWidget(btn, 1)
                 swatch = QPushButton()
                 swatch.setFixedSize(26, 26)
-                swatch.setToolTip(f"Change the {'Set A' if key == 'a' else 'Set B'} color")
+                swatch.setToolTip(f"Change the {'Set A' if key == 'a' else 'Set B'} color for THIS overlay "
+                                  "(right-click: reset / apply to all). Orange border = custom.")
                 swatch.clicked.connect(lambda _, k=key: self._pick_set_color(k))
+                swatch.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                swatch.customContextMenuRequested.connect(
+                    lambda _, k=key: self._set_color_menu(k))
                 self.set_color_btns[key] = swatch
                 row.addWidget(swatch)
                 view_section.addLayout(row)
@@ -2329,6 +2334,7 @@ class OverlayViewer(QWidget):
 
         # Update controls from pair state
         self._update_controls_from_pair(pair)
+        self._refresh_set_color_btns()
         self._needs_fit = True   # new pair -> fit to window once
 
         cached = self._cache.get(index)
@@ -2444,8 +2450,8 @@ class OverlayViewer(QWidget):
                 color_btn.clicked.connect(lambda _, idx=i: self._pick_mask_color(idx))
                 row_layout.addWidget(color_btn)
             elif pair.mask_cutout:
-                default_color = (self.overlay_set.color_b if pair.mask_base == 'a'
-                                 else self.overlay_set.color_a)
+                ca_, cb_ = self.overlay_set.colors_for(pair)
+                default_color = cb_ if pair.mask_base == 'a' else ca_
                 color_btn = QPushButton()
                 color_btn.setFixedSize(20, 22)
                 color_btn.setToolTip(
@@ -2466,7 +2472,7 @@ class OverlayViewer(QWidget):
                     f"{self.overlay_set.set_a_label} color inside this mask. "
                     "Right-click to reset to the default color.")
                 a_btn.setStyleSheet(
-                    f"background:{m.get('window_color_a') or self.overlay_set.color_a}; "
+                    f"background:{m.get('window_color_a') or self.overlay_set.colors_for(pair)[0]}; "
                     "border:1px solid #777; border-radius:3px;")
                 a_btn.clicked.connect(lambda _, idx=i: self._pick_mask_window_color(idx, 'a'))
                 a_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2480,7 +2486,7 @@ class OverlayViewer(QWidget):
                     f"{self.overlay_set.set_b_label} color inside this mask. "
                     "Right-click to reset to the default color.")
                 b_btn.setStyleSheet(
-                    f"background:{m.get('window_color_b') or self.overlay_set.color_b}; "
+                    f"background:{m.get('window_color_b') or self.overlay_set.colors_for(pair)[1]}; "
                     "border:1px solid #777; border-radius:3px;")
                 b_btn.clicked.connect(lambda _, idx=i: self._pick_mask_window_color(idx, 'b'))
                 b_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2550,28 +2556,65 @@ class OverlayViewer(QWidget):
             pair.masks[index]['name'] = text
 
     def _refresh_set_color_btns(self):
-        if 'a' in self.set_color_btns:
-            self.set_color_btns['a'].setStyleSheet(
-                f"background:{self.overlay_set.color_a}; border:1px solid #777; border-radius:3px;")
-        if 'b' in self.set_color_btns:
-            self.set_color_btns['b'].setStyleSheet(
-                f"background:{self.overlay_set.color_b}; border:1px solid #777; border-radius:3px;")
+        """Swatches show the CURRENT overlay's colors (its override, else the default)."""
+        if not self.overlay_set.pairs:
+            ca, cb = self.overlay_set.color_a, self.overlay_set.color_b
+            pair = None
+        else:
+            pair = self._current_pair()
+            ca, cb = self.overlay_set.colors_for(pair)
+        for side, col in (('a', ca), ('b', cb)):
+            btn = self.set_color_btns.get(side)
+            if btn is None:
+                continue
+            custom = bool(pair and (pair.color_a if side == 'a' else pair.color_b))
+            btn.setStyleSheet(
+                f"background:{col}; border:{'2px solid #ffb300' if custom else '1px solid #777'}; "
+                "border-radius:3px;")
 
     def _pick_set_color(self, side: str):
-        """Recolor Set A or Set B everywhere — every pair's composite,
-        solo view and mask defaults use this color, so changing it here
-        invalidates the whole render cache."""
-        current = self.overlay_set.color_a if side == 'a' else self.overlay_set.color_b
+        """Pick the Set A / Set B color for the CURRENT overlay only."""
+        pair = self._current_pair()
+        current = self.overlay_set.colors_for(pair)[0 if side == 'a' else 1]
         label = self.overlay_set.set_a_label if side == 'a' else self.overlay_set.set_b_label
-        c = QColorDialog.getColor(QColor(current), self, f"{label} Color")
+        c = QColorDialog.getColor(QColor(current), self, f"{label} Color (this overlay)")
         if not c.isValid():
             return
         if side == 'a':
-            self.overlay_set.color_a = c.name()
+            pair.color_a = c.name()
         else:
-            self.overlay_set.color_b = c.name()
+            pair.color_b = c.name()
+        self._after_overlay_color_change()
+
+    def _set_color_menu(self, side: str):
+        menu = QMenu(self)
+        reset = menu.addAction("Reset this overlay to default color")
+        apply_all = menu.addAction("Use this color for ALL overlays (new default)")
+        chosen = menu.exec(QCursor.pos())
+        pair = self._current_pair()
+        if chosen is reset:
+            if side == 'a':
+                pair.color_a = None
+            else:
+                pair.color_b = None
+            self._after_overlay_color_change()
+        elif chosen is apply_all:
+            col = self.overlay_set.colors_for(pair)[0 if side == 'a' else 1]
+            if side == 'a':
+                self.overlay_set.color_a = col
+                for p in self.overlay_set.pairs:
+                    p.color_a = None
+            else:
+                self.overlay_set.color_b = col
+                for p in self.overlay_set.pairs:
+                    p.color_b = None
+            self._invalidate_cache()
+            self._after_overlay_color_change(all_pairs=True)
+
+    def _after_overlay_color_change(self, all_pairs: bool = False):
         self._refresh_set_color_btns()
-        self._invalidate_cache()
+        if not all_pairs:
+            self._invalidate_cache(self.current_pair_index)
         if self.overlay_set.pairs:
             self._do_render()
             self._refresh_mask_list()   # mask rows show this as their default color
@@ -2581,9 +2624,9 @@ class OverlayViewer(QWidget):
         if not (0 <= index < len(pair.masks)):
             return
         is_color_mask = pair.masks[index].get('type') == 'color'
+        ca_, cb_ = self.overlay_set.colors_for(pair)
         default_color = ('#ff0000' if is_color_mask else
-                         (self.overlay_set.color_b if pair.mask_base == 'a'
-                          else self.overlay_set.color_a))
+                         (cb_ if pair.mask_base == 'a' else ca_))
         current = pair.masks[index].get('color') or default_color
         title = "Color Mask Line Color" if is_color_mask else "Mask Cutout Color"
         c = QColorDialog.getColor(QColor(current), self, title)
@@ -2608,7 +2651,7 @@ class OverlayViewer(QWidget):
         if not (0 <= index < len(pair.masks)):
             return
         field = 'window_color_a' if side == 'a' else 'window_color_b'
-        default = self.overlay_set.color_a if side == 'a' else self.overlay_set.color_b
+        default = self.overlay_set.colors_for(pair)[0 if side == 'a' else 1]
         label = self.overlay_set.set_a_label if side == 'a' else self.overlay_set.set_b_label
         current = pair.masks[index].get(field) or default
         c = QColorDialog.getColor(QColor(current), self, f"{label} Color (this mask)")
@@ -2925,7 +2968,7 @@ class OverlayViewer(QWidget):
             round(pair.rotation, 3),
             round(pair.pivot_x, 4), round(pair.pivot_y, 4),
             round(pair.scale_factor, 5),
-            s.color_a, s.color_b, s.shared_color, s.render_dpi,
+            *s.colors_for(pair), s.shared_color, s.render_dpi,
             mask_colors,
         )
 
@@ -3331,6 +3374,7 @@ class OverlayViewer(QWidget):
         pair = self._current_pair()
         view_mode = self._current_view_mode()
         partial = pair.is_partial
+        col_a, col_b = self.overlay_set.colors_for(pair)
         sheet = ((pair.page_a.sheet_number if pair.page_a else None)
                  or (pair.page_b.sheet_number if pair.page_b else None)
                  or 'sheet')
@@ -3356,7 +3400,7 @@ class OverlayViewer(QWidget):
                 # Single-sided (drawing unique to one set) — nothing to
                 # overlay against, so just export that one drawing.
                 page = pair.page_a or pair.page_b
-                color = self.overlay_set.color_a if pair.page_a else self.overlay_set.color_b
+                color = col_a if pair.page_a else col_b
                 img = R.render_page(page.pdf_path, page.page_index, dpi)
                 content = R.render_single_colored(img, color)
                 final = self._flatten_export_content(content, pair)
@@ -3378,12 +3422,12 @@ class OverlayViewer(QWidget):
                                            pair.scale_factor, img_a.size)
 
             if view_mode == 'a':
-                content = R.render_single_colored(img_a, self.overlay_set.color_a)
+                content = R.render_single_colored(img_a, col_a)
             elif view_mode == 'b':
-                content = R.render_single_colored(img_b, self.overlay_set.color_b)
+                content = R.render_single_colored(img_b, col_b)
             elif view_mode == 'mask':
-                base_color = (self.overlay_set.color_a if pair.mask_base == 'a'
-                              else self.overlay_set.color_b)
+                base_color = (col_a if pair.mask_base == 'a'
+                              else col_b)
                 base_src = img_a if pair.mask_base == 'a' else img_b
                 base_solo = R.render_single_colored(base_src, base_color)
                 # Color masks recolor the linework inside their box rather
@@ -3392,16 +3436,16 @@ class OverlayViewer(QWidget):
                 # below, using the full A+B overlay as their ink source.
                 window_masks = [m for m in pair.masks if m.get('type') != 'color']
                 inside = R.composite_overlay(img_a, img_b,
-                                              self.overlay_set.color_a,
-                                              self.overlay_set.color_b,
+                                              col_a,
+                                              col_b,
                                               shared_color=self.overlay_set.shared_color)
                 if pair.mask_cutout:
                     # Cutout: the hole reveals the OTHER drawing alone, not
                     # the two blended together. Each mask can override the
                     # color it's revealed in; render each distinct color
                     # once (not per mask) and composite mask-by-mask.
-                    default_other_color = (self.overlay_set.color_b if pair.mask_base == 'a'
-                                           else self.overlay_set.color_a)
+                    default_other_color = (col_b if pair.mask_base == 'a'
+                                           else col_a)
                     other_src = img_b if pair.mask_base == 'a' else img_a
                     colors_needed = {None: default_other_color}
                     for m in window_masks:
@@ -3426,8 +3470,8 @@ class OverlayViewer(QWidget):
                         if key not in overlay_by_colors:
                             overlay_by_colors[key] = R.composite_overlay(
                                 img_a, img_b,
-                                ca or self.overlay_set.color_a,
-                                cb or self.overlay_set.color_b,
+                                ca or col_a,
+                                cb or col_b,
                                 shared_color=self.overlay_set.shared_color)
                     content = R.composite_masked(overlay_by_colors, base_solo, window_masks,
                                                   img_a.width, img_a.height)
@@ -3435,8 +3479,8 @@ class OverlayViewer(QWidget):
                                                    img_a.width, img_a.height)
             else:
                 content = R.composite_overlay(img_a, img_b,
-                                               self.overlay_set.color_a,
-                                               self.overlay_set.color_b,
+                                               col_a,
+                                               col_b,
                                                shared_color=self.overlay_set.shared_color)
 
             final = self._flatten_export_content(content, pair)
